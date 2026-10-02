@@ -137,27 +137,6 @@ std::atomic<bool> is_loading(false);
 HWND g_hPopupWnd = NULL;
 HWND g_hSettingsWnd = NULL;
 
-const char XOR_KEY = 0x5A;
-
-std::string EncryptString(const std::string& in) {
-    std::ostringstream ss;
-    for (unsigned char c : in) {
-        ss << std::hex << std::setw(2) << std::setfill('0') << (int)(c ^ XOR_KEY);
-    }
-    return ss.str();
-}
-
-std::string DecryptString(const std::string& in) {
-    std::string out = "";
-    if (in.length() % 2 != 0) return "";
-    for (size_t i = 0; i < in.length(); i += 2) {
-        std::string byteStr = in.substr(i, 2);
-        char byte = (char)std::strtol(byteStr.c_str(), NULL, 16);
-        out += (byte ^ XOR_KEY);
-    }
-    return out;
-}
-
 std::string MaskKey(const std::string& key) {
     if (key.length() <= 12) return "********";
     return key.substr(0, 8) + "...****";
@@ -334,8 +313,14 @@ bool SendGeminiRequest(const std::string& apiKey, const std::string& model, cons
 
 std::string ExtractGeminiText(const std::string& json) {
     size_t pos = json.find("\"text\": \"");
-    if (pos == std::string::npos) return "";
-    pos += 9;
+    if (pos == std::string::npos) {
+        pos = json.find("\"text\":\"");
+        if (pos == std::string::npos) return "";
+        pos += 8;
+    }
+    else {
+        pos += 9;
+    }
 
     std::string result;
     for (size_t i = pos; i < json.length(); ++i) {
@@ -345,6 +330,10 @@ std::string ExtractGeminiText(const std::string& json) {
             else if (json[i] == 't') result += '\t';
             else if (json[i] == '"') result += '"';
             else if (json[i] == '\\') result += '\\';
+            else {
+                result += '\\';
+                result += json[i];
+            }
         }
         else if (json[i] == '"') {
             break;
@@ -471,12 +460,16 @@ void ShowPopup() {
         return;
     }
 
-    WNDCLASSW wc = { 0 };
-    wc.lpfnWndProc = PopupWndProc;
-    wc.hInstance = GetModuleHandle(NULL);
-    wc.lpszClassName = L"GeminiPopupClass";
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    RegisterClassW(&wc);
+    static bool classRegistered = false;
+    if (!classRegistered) {
+        WNDCLASSW wc = { 0 };
+        wc.lpfnWndProc = PopupWndProc;
+        wc.hInstance = GetModuleHandle(NULL);
+        wc.lpszClassName = L"GeminiPopupClass";
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        RegisterClassW(&wc);
+        classRegistered = true;
+    }
 
     g_hPopupWnd = CreateWindowExW(
         WS_EX_TOPMOST, L"GeminiPopupClass", LOC[g_keys.lang].wTitle,
@@ -541,9 +534,10 @@ void SaveConfig() {
         file << "lang=" << (int)g_keys.lang << "\n";
         file << "model=" << g_keys.selectedModel << "\n\n";
 
-        file << "[EncryptedKeys]\n";
+        // Зберігаємо ключі відкрито
+        file << "[Keys]\n";
         for (const auto& key : API_KEYS) {
-            file << EncryptString(key) << "\n";
+            file << key << "\n";
         }
         file.close();
     }
@@ -559,7 +553,7 @@ void LoadConfig() {
     if (file.is_open()) {
         API_KEYS.clear();
         std::string line;
-        bool readingEncrypted = false;
+        bool readingKeys = false;
 
         while (std::getline(file, line)) {
             line.erase(0, line.find_first_not_of(" \t\r\n"));
@@ -567,12 +561,18 @@ void LoadConfig() {
             if (last != std::string::npos) line.erase(last + 1);
             if (line.empty() || line[0] == '#') continue;
 
-            if (line == "[EncryptedKeys]") {
-                readingEncrypted = true;
+            // Підтримуємо і [Keys], і старий розділ [EncryptedKeys] без падінь
+            if (line == "[Keys]" || line == "[EncryptedKeys]") {
+                readingKeys = true;
                 continue;
             }
 
-            if (!readingEncrypted) {
+            if (line.front() == '[' && line.back() == ']') {
+                readingKeys = false;
+                continue;
+            }
+
+            if (!readingKeys) {
                 size_t eq = line.find('=');
                 if (eq != std::string::npos) {
                     std::string key = line.substr(0, eq);
@@ -593,9 +593,11 @@ void LoadConfig() {
                 }
             }
             else {
-                std::string decrypted = DecryptString(line);
-                if (!decrypted.empty()) {
-                    API_KEYS.push_back(decrypted);
+                // Якщо є формат key1=AIzaSy... або просто AIzaSy...
+                size_t eq = line.find('=');
+                std::string pureKey = (eq != std::string::npos) ? line.substr(eq + 1) : line;
+                if (!pureKey.empty()) {
+                    API_KEYS.push_back(pureKey);
                 }
             }
         }
@@ -671,7 +673,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         SendMessageW(hComboLang, CB_ADDSTRING, 0, (LPARAM)L"Русский");
         SendMessageW(hComboLang, CB_SETCURSEL, (WPARAM)g_keys.lang, 0);
 
-        // Вибір / ручне введення моделі (CBS_DROPDOWN дає змогу і обрати, і вписати вручну)
+        // Вибір / ручне введення моделі
         HWND hModelLbl = CreateWindowW(L"STATIC", L.wModelLabel, WS_CHILD | WS_VISIBLE, 20, 200, 160, 22, hWnd, NULL, NULL, NULL);
         SendMessageW(hModelLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
@@ -682,13 +684,13 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         SetWindowTextW(hComboModel, Utf8ToWide(g_keys.selectedModel).c_str());
 
-        // Блок ключів API
+        // Блок ключів API (показуємо відкриті ключі для можливості редагування)
         HWND hKeysLbl = CreateWindowW(L"STATIC", L.wKeysLabel, WS_CHILD | WS_VISIBLE, 20, 235, 320, 20, hWnd, NULL, NULL, NULL);
         SendMessageW(hKeysLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         std::string keysDisplay = "";
         for (const auto& k : API_KEYS) {
-            keysDisplay += MaskKey(k) + "\r\n";
+            keysDisplay += k + "\r\n";
         }
 
         hEdApiKeys = CreateWindowExW(0, L"EDIT", Utf8ToWide(keysDisplay).c_str(),
@@ -739,15 +741,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 if (last != std::string::npos) kLine.erase(last + 1);
                 if (kLine.empty()) continue;
 
-                if (kLine.find("...****") != std::string::npos || kLine == "********") {
-                    continue;
-                }
                 newKeys.push_back(kLine);
             }
 
-            if (!newKeys.empty()) {
-                API_KEYS = newKeys;
-            }
+            API_KEYS = newKeys;
 
             if (k1 && k2 && k3 && k4 && k5) {
                 g_keys.vkCapture = k1;
@@ -786,12 +783,16 @@ void OpenSettingsGui() {
         return;
     }
 
-    WNDCLASSW wc = { 0 };
-    wc.lpfnWndProc = SettingsWndProc;
-    wc.hInstance = GetModuleHandle(NULL);
-    wc.lpszClassName = L"GeminiSettingsClass";
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    RegisterClassW(&wc);
+    static bool settingsClassRegistered = false;
+    if (!settingsClassRegistered) {
+        WNDCLASSW wc = { 0 };
+        wc.lpfnWndProc = SettingsWndProc;
+        wc.hInstance = GetModuleHandle(NULL);
+        wc.lpszClassName = L"GeminiSettingsClass";
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        RegisterClassW(&wc);
+        settingsClassRegistered = true;
+    }
 
     g_hSettingsWnd = CreateWindowExW(
         WS_EX_TOPMOST, L"GeminiSettingsClass", LOC[g_keys.lang].wSettingsTitle,
