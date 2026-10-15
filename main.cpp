@@ -12,12 +12,19 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
+#include <cwctype>
+#include <cctype>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "ole32.lib")
+
+#define WM_UPDATE_RESPONSE (WM_USER + 101)
+#define IDC_POPUP_EDIT     2001
+#define IDC_POPUP_COPY     2002
+#define IDC_POPUP_CLOSE    2003
 
 enum HotkeyAction {
     HK_CAPTURE = 1,
@@ -46,6 +53,10 @@ struct KeyConfig {
 struct LocStrings {
     const wchar_t* wTitle;
     const wchar_t* wNoResponse;
+    const wchar_t* wLoading;
+    const wchar_t* wCopyBtn;
+    const wchar_t* wCopiedBtn;
+    const wchar_t* wCloseBtn;
     const wchar_t* wSettingsTitle;
     const wchar_t* wCapLabel;
     const wchar_t* wShowLabel;
@@ -67,6 +78,10 @@ const LocStrings LOC[] = {
     {
         L"AI Assistant Response",
         L"No response yet. Press the capture key.",
+        L"Analyzing screenshot, please wait...",
+        L"Copy",
+        L"Copied!",
+        L"Close",
         L"Settings & Keys",
         L"Capture Screen:",
         L"Toggle Window:",
@@ -80,45 +95,53 @@ const LocStrings LOC[] = {
         L"Cancel",
         L"Settings successfully saved to config.ini!",
         L"Invalid key name (e.g. f1-f12, insert, delete, home, end, a-z)",
-        "Analyze this screenshot carefully. If there is a question, test, or task, provide a concise, direct, and correct answer in English. If it contains code or an error, explain the fix concisely in English."
+        "Analyze this screenshot carefully. If there is a question, test, or task, provide a concise, direct, and correct answer in English. If it contains code or an error, explain the fix concisely in English. IMPORTANT: Format your response as clean plain text only. Do NOT use Markdown (no **, *, #) and do NOT use LaTeX math syntax (no $, $$, \\frac, \\text, \\quad). Use standard plain-text math notation and Unicode symbols (e.g., x^2, /, *, <, >, <=, >=, !=)."
     },
     // UK
     {
-        L"Відповідь ШІ",
-        L"Відповіді ще немає. Натисніть клавішу аналізу екрана.",
-        L"Налаштування та Ключі",
-        L"Зробити скріншот:",
-        L"Показати вікно:",
-        L"Консоль / Дебаг:",
-        L"Меню біндів:",
-        L"Вихід з коду:",
-        L"Мова інтерфейсу:",
-        L"Модель Gemini:",
-        L"API-ключі Gemini (по одному на рядок):",
-        L"Зберегти",
-        L"Скасувати",
-        L"Налаштування успішно збережено у config.ini!",
-        L"Некоректна назва клавіші (f1-f12, insert, delete, home, end, a-z)",
-        "Analyze this screenshot carefully. If there is a question, test, or task, provide a concise, direct, and correct answer in Ukrainian. If it contains code or an error, explain the fix concisely in Ukrainian."
+        L"Р’С–РґРїРѕРІС–РґСЊ РЁР†",
+        L"Р’С–РґРїРѕРІС–РґС– С‰Рµ РЅРµРјР°С”. РќР°С‚РёСЃРЅС–С‚СЊ РєР»Р°РІС–С€Сѓ Р°РЅР°Р»С–Р·Сѓ РµРєСЂР°РЅР°.",
+        L"РђРЅР°Р»С–Р·СѓСЋ СЃРєСЂС–РЅС€РѕС‚, Р·Р°С‡РµРєР°Р№С‚Рµ...",
+        L"РљРѕРїС–СЋРІР°С‚Рё",
+        L"РЎРєРѕРїС–Р№РѕРІР°РЅРѕ!",
+        L"Р—Р°РєСЂРёС‚Рё",
+        L"РќР°Р»Р°С€С‚СѓРІР°РЅРЅСЏ С‚Р° РљР»СЋС‡С–",
+        L"Р—СЂРѕР±РёС‚Рё СЃРєСЂС–РЅС€РѕС‚:",
+        L"РџРѕРєР°Р·Р°С‚Рё РІС–РєРЅРѕ:",
+        L"РљРѕРЅСЃРѕР»СЊ / Р”РµР±Р°Рі:",
+        L"РњРµРЅСЋ Р±С–РЅРґС–РІ:",
+        L"Р’РёС…С–Рґ Р· РєРѕРґСѓ:",
+        L"РњРѕРІР° С–РЅС‚РµСЂС„РµР№СЃСѓ:",
+        L"РњРѕРґРµР»СЊ Gemini:",
+        L"API-РєР»СЋС‡С– Gemini (РїРѕ РѕРґРЅРѕРјСѓ РЅР° СЂСЏРґРѕРє):",
+        L"Р—Р±РµСЂРµРіС‚Рё",
+        L"РЎРєР°СЃСѓРІР°С‚Рё",
+        L"РќР°Р»Р°С€С‚СѓРІР°РЅРЅСЏ СѓСЃРїС–С€РЅРѕ Р·Р±РµСЂРµР¶РµРЅРѕ Сѓ config.ini!",
+        L"РќРµРєРѕСЂРµРєС‚РЅР° РЅР°Р·РІР° РєР»Р°РІС–С€С– (f1-f12, insert, delete, home, end, a-z)",
+        "Analyze this screenshot carefully. If there is a question, test, or task, provide a concise, direct, and correct answer in Ukrainian. If it contains code or an error, explain the fix concisely in Ukrainian. IMPORTANT: Format your response as clean plain text only. Do NOT use Markdown (no **, *, #) and do NOT use LaTeX math syntax (no $, $$, \\frac, \\text, \\quad). Use standard plain-text math notation and Unicode symbols (e.g., x^2, /, *, <, >, <=, >=, !=)."
     },
     // RU
     {
-        L"Ответ ИИ",
-        L"Ответа пока нет. Нажмите клавишу захвата экрана.",
-        L"Настройки и Ключи",
-        L"Сделать скриншот:",
-        L"Показать окно:",
-        L"Консоль / Дебаг:",
-        L"Меню биндов:",
-        L"Выход из кода:",
-        L"Язык интерфейса:",
-        L"Модель Gemini:",
-        L"API-ключи Gemini (по одному на строку):",
-        L"Сохранить",
-        L"Отмена",
-        L"Настройки успешно сохранены в config.ini!",
-        L"Неверная клавиша (f1-f12, insert, delete, home, end, a-z)",
-        "Analyze this screenshot carefully. If there is a question, test, or task, provide a concise, direct, and correct answer in Russian. If it contains code or an error, explain the fix concisely in Russian."
+        L"РћС‚РІРµС‚ РР",
+        L"РћС‚РІРµС‚Р° РїРѕРєР° РЅРµС‚. РќР°Р¶РјРёС‚Рµ РєР»Р°РІРёС€Сѓ Р·Р°С…РІР°С‚Р° СЌРєСЂР°РЅР°.",
+        L"РђРЅР°Р»РёР·РёСЂСѓСЋ СЃРєСЂРёРЅС€РѕС‚, РїРѕРґРѕР¶РґРёС‚Рµ...",
+        L"РљРѕРїРёСЂРѕРІР°С‚СЊ",
+        L"РЎРєРѕРїРёСЂРѕРІР°РЅРѕ!",
+        L"Р—Р°РєСЂС‹С‚СЊ",
+        L"РќР°СЃС‚СЂРѕР№РєРё Рё РљР»СЋС‡Рё",
+        L"РЎРґРµР»Р°С‚СЊ СЃРєСЂРёРЅС€РѕС‚:",
+        L"РџРѕРєР°Р·Р°С‚СЊ РѕРєРЅРѕ:",
+        L"РљРѕРЅСЃРѕР»СЊ / Р”РµР±Р°Рі:",
+        L"РњРµРЅСЋ Р±РёРЅРґРѕРІ:",
+        L"Р’С‹С…РѕРґ РёР· РєРѕРґР°:",
+        L"РЇР·С‹Рє РёРЅС‚РµСЂС„РµР№СЃР°:",
+        L"РњРѕРґРµР»СЊ Gemini:",
+        L"API-РєР»СЋС‡Рё Gemini (РїРѕ РѕРґРЅРѕРјСѓ РЅР° СЃС‚СЂРѕРєСѓ):",
+        L"РЎРѕС…СЂР°РЅРёС‚СЊ",
+        L"РћС‚РјРµРЅР°",
+        L"РќР°СЃС‚СЂРѕР№РєРё СѓСЃРїРµС€РЅРѕ СЃРѕС…СЂР°РЅРµРЅС‹ РІ config.ini!",
+        L"РќРµРІРµСЂРЅР°СЏ РєР»Р°РІРёС€Р° (f1-f12, insert, delete, home, end, a-z)",
+        "Analyze this screenshot carefully. If there is a question, test, or task, provide a concise, direct, and correct answer in Russian. If it contains code or an error, explain the fix concisely in Russian. IMPORTANT: Format your response as clean plain text only. Do NOT use Markdown (no **, *, #) and do NOT use LaTeX math syntax (no $, $$, \\frac, \\text, \\quad). Use standard plain-text math notation and Unicode symbols (e.g., x^2, /, *, <, >, <=, >=, !=)."
     }
 };
 
@@ -311,44 +334,282 @@ bool SendGeminiRequest(const std::string& apiKey, const std::string& model, cons
     return true;
 }
 
-std::string ExtractGeminiText(const std::string& json) {
-    size_t pos = json.find("\"text\": \"");
-    if (pos == std::string::npos) {
-        pos = json.find("\"text\":\"");
-        if (pos == std::string::npos) return "";
-        pos += 8;
+static void AppendUtf8Codepoint(std::string& out, unsigned int cp) {
+    if (cp <= 0x7F) {
+        out.push_back((char)cp);
     }
-    else {
-        pos += 9;
+    else if (cp <= 0x7FF) {
+        out.push_back((char)(0xC0 | ((cp >> 6) & 0x1F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    }
+    else if (cp <= 0xFFFF) {
+        out.push_back((char)(0xE0 | ((cp >> 12) & 0x0F)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    }
+    else if (cp <= 0x10FFFF) {
+        out.push_back((char)(0xF0 | ((cp >> 18) & 0x07)));
+        out.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    }
+}
+
+static bool ParseHex4(const std::string& s, size_t pos, unsigned int& outVal) {
+    if (pos + 4 > s.size()) return false;
+    unsigned int val = 0;
+    for (size_t k = 0; k < 4; ++k) {
+        char c = s[pos + k];
+        val <<= 4;
+        if (c >= '0' && c <= '9') val |= (c - '0');
+        else if (c >= 'a' && c <= 'f') val |= (c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') val |= (c - 'A' + 10);
+        else return false;
+    }
+    outVal = val;
+    return true;
+}
+
+static void ReplaceAll(std::string& str, const std::string& from, const std::string& to) {
+    if (from.empty()) return;
+    size_t start_pos = 0;
+    while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
+        str.replace(start_pos, from.length(), to);
+        start_pos += to.length();
+    }
+}
+
+// Finds balanced {...} starting at openBracePos (where str[openBracePos] == '{')
+static bool ExtractBracedGroup(const std::string& str, size_t openBracePos, std::string& outInner, size_t& outAfterClosePos) {
+    if (openBracePos >= str.size() || str[openBracePos] != '{') return false;
+    int depth = 0;
+    for (size_t i = openBracePos; i < str.size(); ++i) {
+        if (str[i] == '{') depth++;
+        else if (str[i] == '}') {
+            depth--;
+            if (depth == 0) {
+                outInner = str.substr(openBracePos + 1, i - openBracePos - 1);
+                outAfterClosePos = i + 1;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool IsSimpleToken(const std::string& s) {
+    if (s.empty()) return false;
+    for (unsigned char c : s) {
+        if (!std::isalnum(c) && c != '.') return false;
+    }
+    return true;
+}
+
+// Cleans Markdown, LaTeX, and any remaining \uXXXX sequences so responses display cleanly in a Win32 EDIT control
+std::string CleanResponseText(std::string text) {
+    // 0. Decode any remaining literal \uXXXX sequences (e.g. \u003e -> >, \u003c -> <)
+    std::string unescaped;
+    unescaped.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\\' && i + 5 < text.size() && text[i + 1] == 'u') {
+            unsigned int cp = 0;
+            if (ParseHex4(text, i + 2, cp)) {
+                AppendUtf8Codepoint(unescaped, cp);
+                i += 5;
+                continue;
+            }
+        }
+        unescaped.push_back(text[i]);
+    }
+    text.swap(unescaped);
+
+    // 1. Handle \frac{a}{b} -> a/b or (a)/(b)
+    size_t pos = 0;
+    while ((pos = text.find("\\frac", pos)) != std::string::npos) {
+        size_t p1 = pos + 5;
+        while (p1 < text.size() && (text[p1] == ' ' || text[p1] == '\t')) p1++;
+        std::string num, den;
+        size_t afterNum = 0, afterDen = 0;
+        if (ExtractBracedGroup(text, p1, num, afterNum)) {
+            size_t p2 = afterNum;
+            while (p2 < text.size() && (text[p2] == ' ' || text[p2] == '\t')) p2++;
+            if (ExtractBracedGroup(text, p2, den, afterDen)) {
+                std::string lhs = IsSimpleToken(num) ? num : "(" + num + ")";
+                std::string rhs = IsSimpleToken(den) ? den : "(" + den + ")";
+                std::string repl = lhs + "/" + rhs;
+                text.replace(pos, afterDen - pos, repl);
+                pos += repl.size();
+                continue;
+            }
+        }
+        pos += 5;
     }
 
-    std::string result;
+    // 2. Handle \text{...}, \mathrm{...}, \mathbf{...}, \textit{...} -> inner text
+    const char* textMacros[] = { "\\text", "\\mathrm", "\\mathbf", "\\textit", "\\textbf" };
+    for (const char* macro : textMacros) {
+        size_t mLen = strlen(macro);
+        pos = 0;
+        while ((pos = text.find(macro, pos)) != std::string::npos) {
+            size_t p1 = pos + mLen;
+            while (p1 < text.size() && (text[p1] == ' ' || text[p1] == '\t')) p1++;
+            std::string inner;
+            size_t afterInner = 0;
+            if (ExtractBracedGroup(text, p1, inner, afterInner)) {
+                text.replace(pos, afterInner - pos, inner);
+                pos += inner.size();
+            }
+            else {
+                pos += mLen;
+            }
+        }
+    }
+
+    // 3. Handle \sqrt{...} -> в€љ(...)
+    pos = 0;
+    while ((pos = text.find("\\sqrt", pos)) != std::string::npos) {
+        size_t p1 = pos + 5;
+        while (p1 < text.size() && (text[p1] == ' ' || text[p1] == '\t')) p1++;
+        std::string inner;
+        size_t afterInner = 0;
+        if (ExtractBracedGroup(text, p1, inner, afterInner)) {
+            std::string repl = IsSimpleToken(inner) ? ("в€љ" + inner) : ("в€љ(" + inner + ")");
+            text.replace(pos, afterInner - pos, repl);
+            pos += repl.size();
+        }
+        else {
+            pos += 5;
+        }
+    }
+
+    // 4. Replace common LaTeX symbols & spacing commands
+    ReplaceAll(text, "\\qquad", "  ");
+    ReplaceAll(text, "\\quad", " ");
+    ReplaceAll(text, "\\left", "");
+    ReplaceAll(text, "\\right", "");
+    ReplaceAll(text, "\\cdot", "В·");
+    ReplaceAll(text, "\\times", "Г—");
+    ReplaceAll(text, "\\div", "Г·");
+    ReplaceAll(text, "\\pm", "В±");
+    ReplaceAll(text, "\\leq", "в‰¤");
+    ReplaceAll(text, "\\geq", "в‰Ґ");
+    ReplaceAll(text, "\\neq", "в‰ ");
+    ReplaceAll(text, "\\le", "в‰¤");
+    ReplaceAll(text, "\\ge", "в‰Ґ");
+    ReplaceAll(text, "\\ne", "в‰ ");
+    ReplaceAll(text, "\\approx", "в‰€");
+    ReplaceAll(text, "\\infty", "в€ћ");
+    ReplaceAll(text, "\\Rightarrow", "=>");
+    ReplaceAll(text, "\\rightarrow", "->");
+    ReplaceAll(text, "\\to", "->");
+    ReplaceAll(text, "\\,", " ");
+    ReplaceAll(text, "\\;", " ");
+    ReplaceAll(text, "\\:", " ");
+
+    // 5. Remove LaTeX math delimiters ($$ and $) and Markdown bold (**)
+    ReplaceAll(text, "$$", "");
+    ReplaceAll(text, "$", "");
+    ReplaceAll(text, "**", "");
+
+    // 6. Clean Markdown headings at start of lines (e.g. ### Title -> Title) and normalize line endings to \r\n
+    std::string normalized;
+    normalized.reserve(text.size() + 64);
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\r') continue;
+        normalized.push_back(text[i]);
+    }
+
+    std::istringstream lineStream(normalized);
+    std::string line;
+    std::string finalOut;
+    bool firstLine = true;
+    while (std::getline(lineStream, line)) {
+        // Strip leading ### or ## if followed by space
+        size_t hPos = 0;
+        while (hPos < line.size() && line[hPos] == '#') hPos++;
+        if (hPos > 0 && hPos < line.size() && line[hPos] == ' ') {
+            line = line.substr(hPos + 1);
+        }
+        // Skip ``` code fence lines
+        if (line.rfind("```", 0) == 0) {
+            continue;
+        }
+        if (!firstLine) finalOut += "\r\n";
+        finalOut += line;
+        firstLine = false;
+    }
+
+    return finalOut;
+}
+
+std::string ExtractGeminiText(const std::string& json) {
+    size_t pos = json.find("\"text\"");
+    if (pos == std::string::npos) return "";
+    pos = json.find(':', pos + 6);
+    if (pos == std::string::npos) return "";
+    pos = json.find('"', pos + 1);
+    if (pos == std::string::npos) return "";
+    pos++; // Move past opening quote
+
+    std::string raw;
     for (size_t i = pos; i < json.length(); ++i) {
         if (json[i] == '\\' && i + 1 < json.length()) {
-            i++;
-            if (json[i] == 'n') result += "\r\n";
-            else if (json[i] == 't') result += '\t';
-            else if (json[i] == '"') result += '"';
-            else if (json[i] == '\\') result += '\\';
-            else {
-                result += '\\';
-                result += json[i];
+            char next = json[++i];
+            switch (next) {
+            case 'n':  raw += '\n'; break;
+            case 'r':  raw += '\r'; break;
+            case 't':  raw += '\t'; break;
+            case 'b':  raw += '\b'; break;
+            case 'f':  raw += '\f'; break;
+            case '"':  raw += '"';  break;
+            case '/':  raw += '/';  break;
+            case '\\': raw += '\\'; break;
+            case 'u': {
+                unsigned int cp = 0;
+                if (ParseHex4(json, i + 1, cp)) {
+                    i += 4;
+                    // Handle UTF-16 surrogate pairs (\uD800..\uDBFF followed by \uDC00..\uDFFF)
+                    if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 < json.length() && json[i + 1] == '\\' && json[i + 2] == 'u') {
+                        unsigned int low = 0;
+                        if (ParseHex4(json, i + 3, low) && low >= 0xDC00 && low <= 0xDFFF) {
+                            cp = 0x10000 + (((cp - 0xD800) << 10) | (low - 0xDC00));
+                            i += 6;
+                        }
+                    }
+                    AppendUtf8Codepoint(raw, cp);
+                }
+                else {
+                    raw += "\\u";
+                }
+                break;
+            }
+            default:
+                raw += '\\';
+                raw += next;
+                break;
             }
         }
         else if (json[i] == '"') {
             break;
         }
         else {
-            result += json[i];
+            raw += json[i];
         }
     }
-    return result;
+    return CleanResponseText(raw);
+}
+
+void NotifyPopupUpdate() {
+    if (g_hPopupWnd != NULL && IsWindow(g_hPopupWnd)) {
+        PostMessageW(g_hPopupWnd, WM_UPDATE_RESPONSE, 0, 0);
+    }
 }
 
 void ProcessScreen() {
     if (API_KEYS.empty()) {
-        latest_answer = "Error: No API keys configured. Press Insert to add your Gemini API keys.";
+        latest_answer = "Error: No API keys configured.\r\nPress Insert to add your Gemini API keys.";
         std::cout << "[-] No API keys configured. Open settings (Insert).\n";
+        NotifyPopupUpdate();
         return;
     }
 
@@ -357,11 +618,14 @@ void ProcessScreen() {
         return;
     }
 
+    NotifyPopupUpdate();
+
     try {
         std::vector<BYTE> imgBytes;
         if (!CaptureScreenJpeg(imgBytes)) {
             latest_answer = "Error taking screenshot.";
             is_loading = false;
+            NotifyPopupUpdate();
             return;
         }
 
@@ -425,28 +689,133 @@ void ProcessScreen() {
     }
 
     is_loading = false;
+    NotifyPopupUpdate();
+}
+
+void CopyTextToClipboard(HWND hOwner, const std::wstring& text) {
+    if (!OpenClipboard(hOwner)) return;
+    EmptyClipboard();
+    size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (hMem) {
+        void* pMem = GlobalLock(hMem);
+        if (pMem) {
+            memcpy(pMem, text.c_str(), bytes);
+            GlobalUnlock(hMem);
+            SetClipboardData(CF_UNICODETEXT, hMem);
+        }
+    }
+    CloseClipboard();
 }
 
 LRESULT CALLBACK PopupWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static HWND hEdit = NULL;
+    static HWND hBtnCopy = NULL;
+    static HWND hBtnClose = NULL;
+    static HFONT hFontText = NULL;
+    static HFONT hFontBtn = NULL;
+
     switch (msg) {
     case WM_CREATE: {
-        std::wstring wText = latest_answer.empty() ? LOC[g_keys.lang].wNoResponse : Utf8ToWide(latest_answer);
-        hEdit = CreateWindowExW(0, L"EDIT", wText.c_str(),
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
-            15, 15, 590, 420, hWnd, NULL, NULL, NULL);
+        const LocStrings& L = LOC[g_keys.lang];
+        std::wstring wText;
+        if (is_loading.load()) {
+            wText = L.wLoading;
+        }
+        else {
+            wText = latest_answer.empty() ? L.wNoResponse : Utf8ToWide(latest_answer);
+        }
 
-        HFONT hFont = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        hFontText = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-        SendMessageW(hEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        hFontBtn = CreateFontW(16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+        hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", wText.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+            15, 15, 630, 415, hWnd, (HMENU)IDC_POPUP_EDIT, NULL, NULL);
+        SendMessageW(hEdit, WM_SETFONT, (WPARAM)hFontText, TRUE);
+        // Remove automatic full-text selection
+        SendMessageW(hEdit, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
+
+        hBtnCopy = CreateWindowW(L"BUTTON", L.wCopyBtn,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            425, 440, 105, 32, hWnd, (HMENU)IDC_POPUP_COPY, NULL, NULL);
+        SendMessageW(hBtnCopy, WM_SETFONT, (WPARAM)hFontBtn, TRUE);
+
+        hBtnClose = CreateWindowW(L"BUTTON", L.wCloseBtn,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            540, 440, 105, 32, hWnd, (HMENU)IDC_POPUP_CLOSE, NULL, NULL);
+        SendMessageW(hBtnClose, WM_SETFONT, (WPARAM)hFontBtn, TRUE);
+        break;
+    }
+    case WM_SIZE: {
+        int width = LOWORD(lParam);
+        int height = HIWORD(lParam);
+        int margin = 15;
+        int btnHeight = 32;
+        int btnWidth = 105;
+        int bottomArea = btnHeight + 20;
+
+        if (hEdit) {
+            MoveWindow(hEdit, margin, margin,
+                (std::max)(100, width - margin * 2),
+                (std::max)(80, height - margin - bottomArea), TRUE);
+        }
+        if (hBtnCopy && hBtnClose) {
+            int btnY = height - btnHeight - 12;
+            MoveWindow(hBtnClose, width - margin - btnWidth, btnY, btnWidth, btnHeight, TRUE);
+            MoveWindow(hBtnCopy, width - margin - btnWidth * 2 - 10, btnY, btnWidth, btnHeight, TRUE);
+        }
+        break;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT: {
+        HDC hdc = (HDC)wParam;
+        SetBkColor(hdc, RGB(255, 255, 255));
+        SetTextColor(hdc, RGB(25, 25, 25));
+        return (LRESULT)GetStockObject(WHITE_BRUSH);
+    }
+    case WM_UPDATE_RESPONSE: {
+        const LocStrings& L = LOC[g_keys.lang];
+        std::wstring wText = is_loading.load()
+            ? L.wLoading
+            : (latest_answer.empty() ? L.wNoResponse : Utf8ToWide(latest_answer));
+        if (hEdit) {
+            SetWindowTextW(hEdit, wText.c_str());
+            SendMessageW(hEdit, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
+        }
+        if (hBtnCopy) {
+            SetWindowTextW(hBtnCopy, L.wCopyBtn);
+        }
+        break;
+    }
+    case WM_COMMAND: {
+        if (LOWORD(wParam) == IDC_POPUP_COPY) {
+            if (!latest_answer.empty()) {
+                CopyTextToClipboard(hWnd, Utf8ToWide(latest_answer));
+                SetWindowTextW(hBtnCopy, LOC[g_keys.lang].wCopiedBtn);
+            }
+        }
+        else if (LOWORD(wParam) == IDC_POPUP_CLOSE || LOWORD(wParam) == IDCANCEL) {
+            DestroyWindow(hWnd);
+        }
         break;
     }
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE) DestroyWindow(hWnd);
         break;
     case WM_DESTROY:
+        if (hFontText) { DeleteObject(hFontText); hFontText = NULL; }
+        if (hFontBtn) { DeleteObject(hFontBtn); hFontBtn = NULL; }
+        hEdit = NULL;
+        hBtnCopy = NULL;
+        hBtnClose = NULL;
         g_hPopupWnd = NULL;
+        PostQuitMessage(0);
         break;
     default:
         return DefWindowProcW(hWnd, msg, wParam, lParam);
@@ -466,20 +835,27 @@ void ShowPopup() {
         wc.lpfnWndProc = PopupWndProc;
         wc.hInstance = GetModuleHandle(NULL);
         wc.lpszClassName = L"GeminiPopupClass";
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         RegisterClassW(&wc);
         classRegistered = true;
     }
 
     g_hPopupWnd = CreateWindowExW(
         WS_EX_TOPMOST, L"GeminiPopupClass", LOC[g_keys.lang].wTitle,
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, 640, 500,
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT, CW_USEDEFAULT, 680, 520,
         NULL, NULL, GetModuleHandle(NULL), NULL
     );
 
+    SetForegroundWindow(g_hPopupWnd);
+
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
+            DestroyWindow(g_hPopupWnd);
+            continue;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -499,7 +875,7 @@ UINT ParseKeyStringToVK(const std::wstring& str) {
     if (str == L"f11") return VK_F11;
     if (str == L"f12") return VK_F12;
     if (str == L"insert") return VK_INSERT;
-    if (str == L"delete") return VK_DELETE;
+    if (str == L"delete") return L"delete" == str ? VK_DELETE : 0;
     if (str == L"home") return VK_HOME;
     if (str == L"end") return VK_END;
     if (str.length() == 1) {
@@ -534,7 +910,7 @@ void SaveConfig() {
         file << "lang=" << (int)g_keys.lang << "\n";
         file << "model=" << g_keys.selectedModel << "\n\n";
 
-        // Зберігаємо ключі відкрито
+        // Р—Р±РµСЂС–РіР°С”РјРѕ РєР»СЋС‡С– РІС–РґРєСЂРёС‚Рѕ
         file << "[Keys]\n";
         for (const auto& key : API_KEYS) {
             file << key << "\n";
@@ -561,7 +937,7 @@ void LoadConfig() {
             if (last != std::string::npos) line.erase(last + 1);
             if (line.empty() || line[0] == '#') continue;
 
-            // Підтримуємо і [Keys], і старий розділ [EncryptedKeys] без падінь
+            // РџС–РґС‚СЂРёРјСѓС”РјРѕ С– [Keys], С– СЃС‚Р°СЂРёР№ СЂРѕР·РґС–Р» [EncryptedKeys] Р±РµР· РїР°РґС–РЅСЊ
             if (line == "[Keys]" || line == "[EncryptedKeys]") {
                 readingKeys = true;
                 continue;
@@ -593,7 +969,7 @@ void LoadConfig() {
                 }
             }
             else {
-                // Якщо є формат key1=AIzaSy... або просто AIzaSy...
+                // РЇРєС‰Рѕ С” С„РѕСЂРјР°С‚ key1=AIzaSy... Р°Р±Рѕ РїСЂРѕСЃС‚Рѕ AIzaSy...
                 size_t eq = line.find('=');
                 std::string pureKey = (eq != std::string::npos) ? line.substr(eq + 1) : line;
                 if (!pureKey.empty()) {
@@ -641,9 +1017,10 @@ void ToggleConsole() {
 
 LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static HWND hEdCapture, hEdShow, hEdExit, hEdSettings, hEdConsole, hComboLang, hComboModel, hEdApiKeys;
+    static HFONT hFont = NULL;
     switch (msg) {
     case WM_CREATE: {
-        HFONT hFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        hFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
@@ -654,7 +1031,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
             hEdit = CreateWindowW(L"EDIT", VKToKeyString(vk).c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER, 190, y, 150, 22, hWnd, NULL, NULL, NULL);
             SendMessageW(hEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
-            };
+        };
 
         CreateLabelAndEdit(L.wCapLabel, 20, hEdCapture, g_keys.vkCapture);
         CreateLabelAndEdit(L.wShowLabel, 50, hEdShow, g_keys.vkShow);
@@ -662,18 +1039,18 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         CreateLabelAndEdit(L.wSettingsLabel, 110, hEdSettings, g_keys.vkSettings);
         CreateLabelAndEdit(L.wExitLabel, 140, hEdExit, g_keys.vkExit);
 
-        // Мова інтерфейсу
+        // РњРѕРІР° С–РЅС‚РµСЂС„РµР№СЃСѓ
         HWND hLangLbl = CreateWindowW(L"STATIC", L.wLangLabel, WS_CHILD | WS_VISIBLE, 20, 170, 160, 22, hWnd, NULL, NULL, NULL);
         SendMessageW(hLangLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         hComboLang = CreateWindowW(L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 190, 170, 150, 120, hWnd, NULL, NULL, NULL);
         SendMessageW(hComboLang, WM_SETFONT, (WPARAM)hFont, TRUE);
         SendMessageW(hComboLang, CB_ADDSTRING, 0, (LPARAM)L"English");
-        SendMessageW(hComboLang, CB_ADDSTRING, 0, (LPARAM)L"Українська");
-        SendMessageW(hComboLang, CB_ADDSTRING, 0, (LPARAM)L"Русский");
+        SendMessageW(hComboLang, CB_ADDSTRING, 0, (LPARAM)L"РЈРєСЂР°С—РЅСЃСЊРєР°");
+        SendMessageW(hComboLang, CB_ADDSTRING, 0, (LPARAM)L"Р СѓСЃСЃРєРёР№");
         SendMessageW(hComboLang, CB_SETCURSEL, (WPARAM)g_keys.lang, 0);
 
-        // Вибір / ручне введення моделі
+        // Р’РёР±С–СЂ / СЂСѓС‡РЅРµ РІРІРµРґРµРЅРЅСЏ РјРѕРґРµР»С–
         HWND hModelLbl = CreateWindowW(L"STATIC", L.wModelLabel, WS_CHILD | WS_VISIBLE, 20, 200, 160, 22, hWnd, NULL, NULL, NULL);
         SendMessageW(hModelLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
@@ -684,7 +1061,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         SetWindowTextW(hComboModel, Utf8ToWide(g_keys.selectedModel).c_str());
 
-        // Блок ключів API (показуємо відкриті ключі для можливості редагування)
+        // Р‘Р»РѕРє РєР»СЋС‡С–РІ API (РїРѕРєР°Р·СѓС”РјРѕ РІС–РґРєСЂРёС‚С– РєР»СЋС‡С– РґР»СЏ РјРѕР¶Р»РёРІРѕСЃС‚С– СЂРµРґР°РіСѓРІР°РЅРЅСЏ)
         HWND hKeysLbl = CreateWindowW(L"STATIC", L.wKeysLabel, WS_CHILD | WS_VISIBLE, 20, 235, 320, 20, hWnd, NULL, NULL, NULL);
         SendMessageW(hKeysLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
@@ -769,7 +1146,9 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         break;
     }
     case WM_DESTROY:
+        if (hFont) { DeleteObject(hFont); hFont = NULL; }
         g_hSettingsWnd = NULL;
+        PostQuitMessage(0);
         break;
     default:
         return DefWindowProcW(hWnd, msg, wParam, lParam);
