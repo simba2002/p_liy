@@ -11,9 +11,9 @@
 #include <random>
 #include <algorithm>
 #include <sstream>
-#include <iomanip>
-#include <cwctype>
 #include <cctype>
+#include <cstdint>
+#include <cstring>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "wininet.lib")
@@ -74,7 +74,6 @@ struct LocStrings {
 };
 
 const LocStrings LOC[] = {
-    // EN
     {
         L"AI Assistant Response",
         L"No response yet. Press the capture key.",
@@ -97,7 +96,6 @@ const LocStrings LOC[] = {
         L"Invalid key name (e.g. f1-f12, insert, delete, home, end, a-z)",
         "Analyze this screenshot carefully. If there is a question, test, or task, provide a concise, direct, and correct answer in English. If it contains code or an error, explain the fix concisely in English. IMPORTANT: Format your response as clean plain text only. Do NOT use Markdown (no **, *, #) and do NOT use LaTeX math syntax (no $, $$, \\frac, \\text, \\quad). Use standard plain-text math notation and Unicode symbols (e.g., x^2, /, *, <, >, <=, >=, !=)."
     },
-    // UK
     {
         L"Відповідь ШІ",
         L"Відповіді ще немає. Натисніть клавішу аналізу екрана.",
@@ -120,7 +118,6 @@ const LocStrings LOC[] = {
         L"Некоректна назва клавіші (f1-f12, insert, delete, home, end, a-z)",
         "Analyze this screenshot carefully. If there is a question, test, or task, provide a concise, direct, and correct answer in Ukrainian. If it contains code or an error, explain the fix concisely in Ukrainian. IMPORTANT: Format your response as clean plain text only. Do NOT use Markdown (no **, *, #) and do NOT use LaTeX math syntax (no $, $$, \\frac, \\text, \\quad). Use standard plain-text math notation and Unicode symbols (e.g., x^2, /, *, <, >, <=, >=, !=)."
     },
-    // RU
     {
         L"Ответ ИИ",
         L"Ответа пока нет. Нажмите клавишу захвата экрана.",
@@ -160,9 +157,159 @@ std::atomic<bool> is_loading(false);
 HWND g_hPopupWnd = NULL;
 HWND g_hSettingsWnd = NULL;
 
+static const char* CIPHER_ALPHABET = "q8Nw2Km9Px5Rz7Lv4Tb6Yc3Hd1Fg0JkE_nSpWuAyCeGiMoU-aBDrsItVjXlhOZfQ";
+
+static uint64_t MixState64(uint64_t x) {
+    x ^= x >> 30;
+    x *= 0xBF58476D1CE4E5B9ULL;
+    x ^= x >> 27;
+    x *= 0x94D049BB133111EBULL;
+    x ^= x >> 31;
+    return x;
+}
+
+static uint8_t RotL8(uint8_t v, unsigned int s) {
+    s &= 7;
+    return (uint8_t)((v << s) | (v >> ((8 - s) & 7)));
+}
+
+static uint8_t RotR8(uint8_t v, unsigned int s) {
+    s &= 7;
+    return (uint8_t)((v >> s) | (v << ((8 - s) & 7)));
+}
+
+static uint32_t ComputeKeyMac(const std::string& plain, uint32_t salt) {
+    uint64_t h = 0x736F6D6570736575ULL ^ ((uint64_t)salt * 0x9E3779B97F4A7C15ULL);
+    for (size_t i = 0; i < plain.size(); ++i) {
+        h ^= (uint64_t)(uint8_t)plain[i] + (i * 0x517CC1B727220A95ULL);
+        h = MixState64(h);
+    }
+    return (uint32_t)(h ^ (h >> 32));
+}
+
+static std::string CustomArmorEncode(const std::vector<uint8_t>& data) {
+    std::string out = "v9$";
+    uint32_t acc = 0;
+    int bits = 0;
+    for (uint8_t b : data) {
+        acc = (acc << 8) | b;
+        bits += 8;
+        while (bits >= 6) {
+            bits -= 6;
+            out.push_back(CIPHER_ALPHABET[(acc >> bits) & 0x3F]);
+        }
+    }
+    if (bits > 0) {
+        out.push_back(CIPHER_ALPHABET[(acc << (6 - bits)) & 0x3F]);
+    }
+    return out;
+}
+
+static bool CustomArmorDecode(const std::string& str, std::vector<uint8_t>& out) {
+    if (str.size() < 12 || str.compare(0, 3, "v9$") != 0) return false;
+    out.clear();
+    uint32_t acc = 0;
+    int bits = 0;
+    for (size_t i = 3; i < str.size(); ++i) {
+        const char* p = std::strchr(CIPHER_ALPHABET, str[i]);
+        if (!p) return false;
+        uint32_t val = (uint32_t)(p - CIPHER_ALPHABET);
+        acc = (acc << 6) | val;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back((uint8_t)((acc >> bits) & 0xFF));
+        }
+    }
+    return out.size() > 8;
+}
+
+std::string EncryptApiKey(const std::string& plain) {
+    if (plain.empty()) return "";
+    uint32_t salt = ComputeKeyMac(plain, 0xA5C3F179U) ^ 0x3C6EF372U;
+    uint32_t mac = ComputeKeyMac(plain, salt);
+
+    std::vector<uint8_t> buf(8 + plain.size());
+    for (int i = 0; i < 4; ++i) buf[i] = (uint8_t)((salt >> (i * 8)) & 0xFF);
+
+    uint64_t state = MixState64(0x4F2A8B1E9C7D6351ULL ^ salt);
+    uint8_t prev = (uint8_t)(salt & 0xFF);
+
+    for (int i = 0; i < 4; ++i) {
+        state = MixState64(state + i + prev);
+        uint8_t m = (uint8_t)((mac >> (i * 8)) & 0xFF);
+        uint8_t k1 = (uint8_t)(state & 0xFF);
+        uint8_t k2 = (uint8_t)((state >> 19) & 0xFF);
+        uint8_t c = RotL8(m ^ k1 ^ prev, (unsigned int)(state >> 11)) + k2;
+        buf[4 + i] = c;
+        prev = c;
+    }
+
+    for (size_t i = 0; i < plain.size(); ++i) {
+        state = MixState64(state ^ ((uint64_t)prev << 17) ^ (uint64_t)(i * 0x1F3D));
+        uint8_t p = (uint8_t)plain[i];
+        uint8_t k1 = (uint8_t)(state & 0xFF);
+        uint8_t k2 = (uint8_t)((state >> 23) & 0xFF);
+        uint8_t k3 = (uint8_t)((state >> 41) & 0xFF);
+        uint8_t step = RotL8(p ^ k1, (unsigned int)(state >> 7)) + k2;
+        uint8_t c = RotL8(step ^ prev, (unsigned int)(state >> 31)) ^ k3;
+        buf[8 + i] = c;
+        prev = c ^ (uint8_t)(state >> 53);
+    }
+
+    return CustomArmorEncode(buf);
+}
+
+std::string DecryptApiKeyOrRaw(const std::string& input) {
+    std::vector<uint8_t> buf;
+    if (!CustomArmorDecode(input, buf)) return input;
+
+    uint32_t salt = 0;
+    for (int i = 0; i < 4; ++i) salt |= ((uint32_t)buf[i] << (i * 8));
+
+    uint64_t state = MixState64(0x4F2A8B1E9C7D6351ULL ^ salt);
+    uint8_t prev = (uint8_t)(salt & 0xFF);
+    uint32_t mac = 0;
+
+    for (int i = 0; i < 4; ++i) {
+        state = MixState64(state + i + prev);
+        uint8_t c = buf[4 + i];
+        uint8_t k1 = (uint8_t)(state & 0xFF);
+        uint8_t k2 = (uint8_t)((state >> 19) & 0xFF);
+        uint8_t m = RotR8((uint8_t)(c - k2), (unsigned int)(state >> 11)) ^ k1 ^ prev;
+        mac |= ((uint32_t)m << (i * 8));
+        prev = c;
+    }
+
+    std::string plain;
+    plain.resize(buf.size() - 8);
+    for (size_t i = 0; i < plain.size(); ++i) {
+        state = MixState64(state ^ ((uint64_t)prev << 17) ^ (uint64_t)(i * 0x1F3D));
+        uint8_t c = buf[8 + i];
+        uint8_t k1 = (uint8_t)(state & 0xFF);
+        uint8_t k2 = (uint8_t)((state >> 23) & 0xFF);
+        uint8_t k3 = (uint8_t)((state >> 41) & 0xFF);
+        uint8_t step = RotR8(c ^ k3, (unsigned int)(state >> 31)) ^ prev;
+        uint8_t p = RotR8((uint8_t)(step - k2), (unsigned int)(state >> 7)) ^ k1;
+        plain[i] = (char)p;
+        prev = c ^ (uint8_t)(state >> 53);
+    }
+
+    if (ComputeKeyMac(plain, salt) != mac) return input;
+    return plain;
+}
+
 std::string MaskKey(const std::string& key) {
-    if (key.length() <= 12) return "********";
-    return key.substr(0, 8) + "...****";
+    std::string enc = EncryptApiKey(key);
+    if (enc.length() <= 14) return enc;
+    return enc.substr(0, 10) + "..." + enc.substr(enc.length() - 4);
+}
+
+static std::string TrimString(const std::string& s) {
+    size_t first = s.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    size_t last = s.find_last_not_of(" \t\r\n");
+    return s.substr(first, last - first + 1);
 }
 
 std::wstring Utf8ToWide(const std::string& str) {
@@ -379,7 +526,6 @@ static void ReplaceAll(std::string& str, const std::string& from, const std::str
     }
 }
 
-// Finds balanced {...} starting at openBracePos (where str[openBracePos] == '{')
 static bool ExtractBracedGroup(const std::string& str, size_t openBracePos, std::string& outInner, size_t& outAfterClosePos) {
     if (openBracePos >= str.size() || str[openBracePos] != '{') return false;
     int depth = 0;
@@ -405,25 +551,7 @@ static bool IsSimpleToken(const std::string& s) {
     return true;
 }
 
-// Cleans Markdown, LaTeX, and any remaining \uXXXX sequences so responses display cleanly in a Win32 EDIT control
 std::string CleanResponseText(std::string text) {
-    // 0. Decode any remaining literal \uXXXX sequences (e.g. \u003e -> >, \u003c -> <)
-    std::string unescaped;
-    unescaped.reserve(text.size());
-    for (size_t i = 0; i < text.size(); ++i) {
-        if (text[i] == '\\' && i + 5 < text.size() && text[i + 1] == 'u') {
-            unsigned int cp = 0;
-            if (ParseHex4(text, i + 2, cp)) {
-                AppendUtf8Codepoint(unescaped, cp);
-                i += 5;
-                continue;
-            }
-        }
-        unescaped.push_back(text[i]);
-    }
-    text.swap(unescaped);
-
-    // 1. Handle \frac{a}{b} -> a/b or (a)/(b)
     size_t pos = 0;
     while ((pos = text.find("\\frac", pos)) != std::string::npos) {
         size_t p1 = pos + 5;
@@ -445,10 +573,9 @@ std::string CleanResponseText(std::string text) {
         pos += 5;
     }
 
-    // 2. Handle \text{...}, \mathrm{...}, \mathbf{...}, \textit{...} -> inner text
     const char* textMacros[] = { "\\text", "\\mathrm", "\\mathbf", "\\textit", "\\textbf" };
     for (const char* macro : textMacros) {
-        size_t mLen = strlen(macro);
+        size_t mLen = std::strlen(macro);
         pos = 0;
         while ((pos = text.find(macro, pos)) != std::string::npos) {
             size_t p1 = pos + mLen;
@@ -465,7 +592,6 @@ std::string CleanResponseText(std::string text) {
         }
     }
 
-    // 3. Handle \sqrt{...} -> √(...)
     pos = 0;
     while ((pos = text.find("\\sqrt", pos)) != std::string::npos) {
         size_t p1 = pos + 5;
@@ -482,7 +608,6 @@ std::string CleanResponseText(std::string text) {
         }
     }
 
-    // 4. Replace common LaTeX symbols & spacing commands
     ReplaceAll(text, "\\qquad", "  ");
     ReplaceAll(text, "\\quad", " ");
     ReplaceAll(text, "\\left", "");
@@ -505,18 +630,14 @@ std::string CleanResponseText(std::string text) {
     ReplaceAll(text, "\\,", " ");
     ReplaceAll(text, "\\;", " ");
     ReplaceAll(text, "\\:", " ");
-
-    // 5. Remove LaTeX math delimiters ($$ and $) and Markdown bold (**)
     ReplaceAll(text, "$$", "");
     ReplaceAll(text, "$", "");
     ReplaceAll(text, "**", "");
 
-    // 6. Clean Markdown headings at start of lines (e.g. ### Title -> Title) and normalize line endings to \r\n
     std::string normalized;
-    normalized.reserve(text.size() + 64);
-    for (size_t i = 0; i < text.size(); ++i) {
-        if (text[i] == '\r') continue;
-        normalized.push_back(text[i]);
+    normalized.reserve(text.size());
+    for (char c : text) {
+        if (c != '\r') normalized.push_back(c);
     }
 
     std::istringstream lineStream(normalized);
@@ -524,16 +645,12 @@ std::string CleanResponseText(std::string text) {
     std::string finalOut;
     bool firstLine = true;
     while (std::getline(lineStream, line)) {
-        // Strip leading ### or ## if followed by space
         size_t hPos = 0;
         while (hPos < line.size() && line[hPos] == '#') hPos++;
         if (hPos > 0 && hPos < line.size() && line[hPos] == ' ') {
             line = line.substr(hPos + 1);
         }
-        // Skip ``` code fence lines
-        if (line.rfind("```", 0) == 0) {
-            continue;
-        }
+        if (line.rfind("```", 0) == 0) continue;
         if (!firstLine) finalOut += "\r\n";
         finalOut += line;
         firstLine = false;
@@ -549,7 +666,7 @@ std::string ExtractGeminiText(const std::string& json) {
     if (pos == std::string::npos) return "";
     pos = json.find('"', pos + 1);
     if (pos == std::string::npos) return "";
-    pos++; // Move past opening quote
+    pos++;
 
     std::string raw;
     for (size_t i = pos; i < json.length(); ++i) {
@@ -568,7 +685,6 @@ std::string ExtractGeminiText(const std::string& json) {
                 unsigned int cp = 0;
                 if (ParseHex4(json, i + 1, cp)) {
                     i += 4;
-                    // Handle UTF-16 surrogate pairs (\uD800..\uDBFF followed by \uDC00..\uDFFF)
                     if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 < json.length() && json[i + 1] == '\\' && json[i + 2] == 'u') {
                         unsigned int low = 0;
                         if (ParseHex4(json, i + 3, low) && low >= 0xDC00 && low <= 0xDFFF) {
@@ -651,8 +767,7 @@ void ProcessScreen() {
 
         for (size_t idx = 0; idx < keysToTry.size(); ++idx) {
             const auto& key = keysToTry[idx];
-            std::string keyPreview = MaskKey(key);
-            std::cout << "[*] Trying key " << (idx + 1) << "/" << keysToTry.size() << " [" << keyPreview << "]...\n";
+            std::cout << "[*] Trying key " << (idx + 1) << "/" << keysToTry.size() << " [" << MaskKey(key) << "]...\n";
             std::cout << "   -> Model: " << currentModel << "...\n";
 
             std::string response;
@@ -676,7 +791,6 @@ void ProcessScreen() {
                     std::cout << "[-] HTTP Error: " << statusCode << "\n";
                 }
             }
-            if (success) break;
         }
 
         if (!success) {
@@ -700,7 +814,7 @@ void CopyTextToClipboard(HWND hOwner, const std::wstring& text) {
     if (hMem) {
         void* pMem = GlobalLock(hMem);
         if (pMem) {
-            memcpy(pMem, text.c_str(), bytes);
+            std::memcpy(pMem, text.c_str(), bytes);
             GlobalUnlock(hMem);
             SetClipboardData(CF_UNICODETEXT, hMem);
         }
@@ -718,13 +832,9 @@ LRESULT CALLBACK PopupWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     switch (msg) {
     case WM_CREATE: {
         const LocStrings& L = LOC[g_keys.lang];
-        std::wstring wText;
-        if (is_loading.load()) {
-            wText = L.wLoading;
-        }
-        else {
-            wText = latest_answer.empty() ? L.wNoResponse : Utf8ToWide(latest_answer);
-        }
+        std::wstring wText = is_loading.load()
+            ? L.wLoading
+            : (latest_answer.empty() ? L.wNoResponse : Utf8ToWide(latest_answer));
 
         hFontText = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
@@ -738,7 +848,6 @@ LRESULT CALLBACK PopupWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
             15, 15, 630, 415, hWnd, (HMENU)IDC_POPUP_EDIT, NULL, NULL);
         SendMessageW(hEdit, WM_SETFONT, (WPARAM)hFontText, TRUE);
-        // Remove automatic full-text selection
         SendMessageW(hEdit, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
 
         hBtnCopy = CreateWindowW(L"BUTTON", L.wCopyBtn,
@@ -862,24 +971,16 @@ void ShowPopup() {
 }
 
 UINT ParseKeyStringToVK(const std::wstring& str) {
-    if (str == L"f1") return VK_F1;
-    if (str == L"f2") return VK_F2;
-    if (str == L"f3") return VK_F3;
-    if (str == L"f4") return VK_F4;
-    if (str == L"f5") return VK_F5;
-    if (str == L"f6") return VK_F6;
-    if (str == L"f7") return VK_F7;
-    if (str == L"f8") return VK_F8;
-    if (str == L"f9") return VK_F9;
-    if (str == L"f10") return VK_F10;
-    if (str == L"f11") return VK_F11;
-    if (str == L"f12") return VK_F12;
+    if (str.size() >= 2 && (str[0] == L'f' || str[0] == L'F')) {
+        int fn = _wtoi(str.c_str() + 1);
+        if (fn >= 1 && fn <= 12) return VK_F1 + (fn - 1);
+    }
     if (str == L"insert") return VK_INSERT;
-    if (str == L"delete") return L"delete" == str ? VK_DELETE : 0;
+    if (str == L"delete") return VK_DELETE;
     if (str == L"home") return VK_HOME;
     if (str == L"end") return VK_END;
     if (str.length() == 1) {
-        wchar_t ch = towupper(str[0]);
+        wchar_t ch = (wchar_t)CharUpperW((LPWSTR)(ULONG_PTR)str[0]);
         if ((ch >= L'A' && ch <= L'Z') || (ch >= L'0' && ch <= L'9')) return (UINT)ch;
     }
     return 0;
@@ -892,7 +993,8 @@ std::wstring VKToKeyString(UINT vk) {
     if (vk == VK_HOME) return L"home";
     if (vk == VK_END) return L"end";
     if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
-        return std::wstring(1, (wchar_t)towlower(vk));
+        wchar_t ch = (wchar_t)CharLowerW((LPWSTR)(ULONG_PTR)vk);
+        return std::wstring(1, ch);
     }
     return L"unknown";
 }
@@ -910,10 +1012,9 @@ void SaveConfig() {
         file << "lang=" << (int)g_keys.lang << "\n";
         file << "model=" << g_keys.selectedModel << "\n\n";
 
-        // Зберігаємо ключі відкрито
-        file << "[Keys]\n";
+        file << "[EncryptedKeys]\n";
         for (const auto& key : API_KEYS) {
-            file << key << "\n";
+            file << EncryptApiKey(key) << "\n";
         }
         file.close();
     }
@@ -932,12 +1033,9 @@ void LoadConfig() {
         bool readingKeys = false;
 
         while (std::getline(file, line)) {
-            line.erase(0, line.find_first_not_of(" \t\r\n"));
-            size_t last = line.find_last_not_of(" \t\r\n");
-            if (last != std::string::npos) line.erase(last + 1);
+            line = TrimString(line);
             if (line.empty() || line[0] == '#') continue;
 
-            // Підтримуємо і [Keys], і старий розділ [EncryptedKeys] без падінь
             if (line == "[Keys]" || line == "[EncryptedKeys]") {
                 readingKeys = true;
                 continue;
@@ -951,8 +1049,8 @@ void LoadConfig() {
             if (!readingKeys) {
                 size_t eq = line.find('=');
                 if (eq != std::string::npos) {
-                    std::string key = line.substr(0, eq);
-                    std::string val = line.substr(eq + 1);
+                    std::string key = TrimString(line.substr(0, eq));
+                    std::string val = TrimString(line.substr(eq + 1));
 
                     if (key == "capture") g_keys.vkCapture = ParseKeyStringToVK(Utf8ToWide(val));
                     else if (key == "show") g_keys.vkShow = ParseKeyStringToVK(Utf8ToWide(val));
@@ -963,15 +1061,17 @@ void LoadConfig() {
                         int l = std::atoi(val.c_str());
                         if (l >= 0 && l <= 2) g_keys.lang = (AppLanguage)l;
                     }
-                    else if (key == "model") {
-                        if (!val.empty()) g_keys.selectedModel = val;
+                    else if (key == "model" && !val.empty()) {
+                        g_keys.selectedModel = val;
                     }
                 }
             }
             else {
-                // Якщо є формат key1=AIzaSy... або просто AIzaSy...
                 size_t eq = line.find('=');
-                std::string pureKey = (eq != std::string::npos) ? line.substr(eq + 1) : line;
+                std::string rawEntry = (eq != std::string::npos && line.compare(0, 3, "v9$") != 0)
+                    ? TrimString(line.substr(eq + 1))
+                    : line;
+                std::string pureKey = DecryptApiKeyOrRaw(rawEntry);
                 if (!pureKey.empty()) {
                     API_KEYS.push_back(pureKey);
                 }
@@ -1039,7 +1139,6 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         CreateLabelAndEdit(L.wSettingsLabel, 110, hEdSettings, g_keys.vkSettings);
         CreateLabelAndEdit(L.wExitLabel, 140, hEdExit, g_keys.vkExit);
 
-        // Мова інтерфейсу
         HWND hLangLbl = CreateWindowW(L"STATIC", L.wLangLabel, WS_CHILD | WS_VISIBLE, 20, 170, 160, 22, hWnd, NULL, NULL, NULL);
         SendMessageW(hLangLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
@@ -1050,7 +1149,6 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         SendMessageW(hComboLang, CB_ADDSTRING, 0, (LPARAM)L"Русский");
         SendMessageW(hComboLang, CB_SETCURSEL, (WPARAM)g_keys.lang, 0);
 
-        // Вибір / ручне введення моделі
         HWND hModelLbl = CreateWindowW(L"STATIC", L.wModelLabel, WS_CHILD | WS_VISIBLE, 20, 200, 160, 22, hWnd, NULL, NULL, NULL);
         SendMessageW(hModelLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
@@ -1061,13 +1159,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         SetWindowTextW(hComboModel, Utf8ToWide(g_keys.selectedModel).c_str());
 
-        // Блок ключів API (показуємо відкриті ключі для можливості редагування)
         HWND hKeysLbl = CreateWindowW(L"STATIC", L.wKeysLabel, WS_CHILD | WS_VISIBLE, 20, 235, 320, 20, hWnd, NULL, NULL, NULL);
         SendMessageW(hKeysLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        std::string keysDisplay = "";
+        std::string keysDisplay;
         for (const auto& k : API_KEYS) {
-            keysDisplay += k + "\r\n";
+            keysDisplay += EncryptApiKey(k) + "\r\n";
         }
 
         hEdApiKeys = CreateWindowExW(0, L"EDIT", Utf8ToWide(keysDisplay).c_str(),
@@ -1098,10 +1195,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             UINT k5 = ParseKeyStringToVK(b5);
             int selLang = (int)SendMessageW(hComboLang, CB_GETCURSEL, 0, 0);
 
-            std::string chosenModel = WideToUtf8(bModel);
-            chosenModel.erase(0, chosenModel.find_first_not_of(" \t\r\n"));
-            size_t lModel = chosenModel.find_last_not_of(" \t\r\n");
-            if (lModel != std::string::npos) chosenModel.erase(lModel + 1);
+            std::string chosenModel = TrimString(WideToUtf8(bModel));
             if (chosenModel.empty()) chosenModel = "gemini-3.5-flash-lite";
 
             int textLen = GetWindowTextLengthW(hEdApiKeys);
@@ -1113,17 +1207,14 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             std::istringstream stream(rawKeys);
             std::string kLine;
             while (std::getline(stream, kLine)) {
-                kLine.erase(0, kLine.find_first_not_of(" \t\r\n"));
-                size_t last = kLine.find_last_not_of(" \t\r\n");
-                if (last != std::string::npos) kLine.erase(last + 1);
+                kLine = TrimString(kLine);
                 if (kLine.empty()) continue;
-
-                newKeys.push_back(kLine);
+                std::string dec = DecryptApiKeyOrRaw(kLine);
+                if (!dec.empty()) newKeys.push_back(dec);
             }
 
-            API_KEYS = newKeys;
-
             if (k1 && k2 && k3 && k4 && k5) {
+                API_KEYS = newKeys;
                 g_keys.vkCapture = k1;
                 g_keys.vkShow = k2;
                 g_keys.vkConsole = k3;
