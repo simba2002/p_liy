@@ -2,6 +2,8 @@
 #include <objidl.h>
 #include <gdiplus.h>
 #include <wininet.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -12,6 +14,7 @@
 #include <algorithm>
 #include <sstream>
 #include <cctype>
+#include <cwctype>
 #include <cstdint>
 #include <cstring>
 
@@ -20,11 +23,22 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 #define WM_UPDATE_RESPONSE (WM_USER + 101)
+#define WM_APPLY_THEME     (WM_USER + 102)
+
 #define IDC_POPUP_EDIT     2001
 #define IDC_POPUP_COPY     2002
 #define IDC_POPUP_CLOSE    2003
+#define IDC_POPUP_THEME    2004
+
+#define IDC_SET_SAVE       1001
+#define IDC_SET_CANCEL     1002
+#define IDC_SET_THEME      1003
+#define IDC_SET_RESET_PRM  1004
+#define IDC_SET_LANG_COMBO 1005
 
 enum HotkeyAction {
     HK_CAPTURE = 1,
@@ -47,7 +61,9 @@ struct KeyConfig {
     UINT vkSettings = VK_INSERT;
     UINT vkConsole = VK_HOME;
     AppLanguage lang = LANG_EN;
+    bool darkTheme = true;
     std::string selectedModel = "gemini-3.5-flash-lite";
+    std::string customPrompt = "";
 } g_keys;
 
 struct LocStrings {
@@ -65,15 +81,21 @@ struct LocStrings {
     const wchar_t* wExitLabel;
     const wchar_t* wLangLabel;
     const wchar_t* wModelLabel;
+    const wchar_t* wPromptLabel;
+    const wchar_t* wResetPromptBtn;
     const wchar_t* wKeysLabel;
     const wchar_t* wSaveBtn;
     const wchar_t* wCancelBtn;
+    const wchar_t* wThemeDarkBtn;
+    const wchar_t* wThemeLightBtn;
     const wchar_t* wSuccessSave;
     const wchar_t* wErrKey;
     const char* aiPrompt;
 };
 
+// Using explicit Unicode escapes (\uXXXX) prevents MSVC codepage / UTF-8 BOM mojibake
 const LocStrings LOC[] = {
+    // 0: English
     {
         L"AI Assistant Response",
         L"No response yet. Press the capture key.",
@@ -89,55 +111,115 @@ const LocStrings LOC[] = {
         L"Exit Program:",
         L"Interface Language:",
         L"Gemini Model:",
+        L"AI Prompt (sent with screenshot):",
+        L"Default",
         L"Gemini API Keys (One per line):",
         L"Save",
         L"Cancel",
+        L"Theme: Dark",
+        L"Theme: Light",
         L"Settings successfully saved to config.ini!",
         L"Invalid key name (e.g. f1-f12, insert, delete, home, end, a-z)",
         "Analyze this screenshot carefully. If there is a question, test, or task, provide a concise, direct, and correct answer in English. If it contains code or an error, explain the fix concisely in English. IMPORTANT: Format your response as clean plain text only. Do NOT use Markdown (no **, *, #) and do NOT use LaTeX math syntax (no $, $$, \\frac, \\text, \\quad). Use standard plain-text math notation and Unicode symbols (e.g., x^2, /, *, <, >, <=, >=, !=)."
     },
+    // 1: Українська
     {
-        L"Відповідь ШІ",
-        L"Відповіді ще немає. Натисніть клавішу аналізу екрана.",
-        L"Аналізую скріншот, зачекайте...",
-        L"Копіювати",
-        L"Скопійовано!",
-        L"Закрити",
-        L"Налаштування та Ключі",
-        L"Зробити скріншот:",
-        L"Показати вікно:",
-        L"Консоль / Дебаг:",
-        L"Меню біндів:",
-        L"Вихід з коду:",
-        L"Мова інтерфейсу:",
-        L"Модель Gemini:",
-        L"API-ключі Gemini (по одному на рядок):",
-        L"Зберегти",
-        L"Скасувати",
-        L"Налаштування успішно збережено у config.ini!",
-        L"Некоректна назва клавіші (f1-f12, insert, delete, home, end, a-z)",
+        // "Відповідь ШІ"
+        L"\u0412\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u044C \u0428\u0406",
+        // "Відповіді ще немає. Натисніть клавішу аналізу екрана."
+        L"\u0412\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u0456 \u0449\u0435 \u043D\u0435\u043C\u0430\u0454. \u041D\u0430\u0442\u0438\u0441\u043D\u0456\u0442\u044C \u043A\u043B\u0430\u0432\u0456\u0448\u0443 \u0430\u043D\u0430\u043B\u0456\u0437\u0443 \u0435\u043A\u0440\u0430\u043D\u0430.",
+        // "Аналізую скріншот, зачекайте..."
+        L"\u0410\u043D\u0430\u043B\u0456\u0437\u0443\u044E \u0441\u043A\u0440\u0456\u043D\u0448\u043E\u0442, \u0437\u0430\u0447\u0435\u043A\u0430\u0439\u0442\u0435...",
+        // "Копіювати"
+        L"\u041A\u043E\u043F\u0456\u044E\u0432\u0430\u0442\u0438",
+        // "Скопійовано!"
+        L"\u0421\u043A\u043E\u043F\u0456\u0439\u043E\u0432\u0430\u043D\u043E!",
+        // "Закрити"
+        L"\u0417\u0430\u043A\u0440\u0438\u0442\u0438",
+        // "Налаштування та Ключі"
+        L"\u041D\u0430\u043B\u0430\u0448\u0442\u0443\u0432\u0430\u043D\u043D\u044F \u0442\u0430 \u041A\u043B\u044E\u0447\u0456",
+        // "Зробити скріншот:"
+        L"\u0417\u0440\u043E\u0431\u0438\u0442\u0438 \u0441\u043A\u0440\u0456\u043D\u0448\u043E\u0442:",
+        // "Показати вікно:"
+        L"\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u0438 \u0432\u0456\u043A\u043D\u043E:",
+        // "Консоль / Дебаг:"
+        L"\u041A\u043E\u043D\u0441\u043E\u043B\u044C / \u0414\u0435\u0431\u0430\u0433:",
+        // "Меню налаштувань:"
+        L"\u041C\u0435\u043D\u044E \u043D\u0430\u043B\u0430\u0448\u0442\u0443\u0432\u0430\u043D\u044C:",
+        // "Вихід з програми:"
+        L"\u0412\u0438\u0445\u0456\u0434 \u0437 \u043F\u0440\u043E\u0433\u0440\u0430\u043C\u0438:",
+        // "Мова інтерфейсу:"
+        L"\u041C\u043E\u0432\u0430 \u0456\u043D\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0443:",
+        // "Модель Gemini:"
+        L"\u041C\u043E\u0434\u0435\u043B\u044C Gemini:",
+        // "Промпт для ШІ (відправляється зі скріншотом):"
+        L"\u041F\u0440\u043E\u043C\u043F\u0442 \u0434\u043B\u044F \u0428\u0406 (\u0437\u0456 \u0441\u043A\u0440\u0456\u043D\u0448\u043E\u0442\u043E\u043C):",
+        // "Стандартний"
+        L"\u0421\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u0438\u0439",
+        // "API-ключі Gemini (по одному на рядок):"
+        L"API-\u043A\u043B\u044E\u0447\u0456 Gemini (\u043F\u043E \u043E\u0434\u043D\u043E\u043C\u0443 \u043D\u0430 \u0440\u044F\u0434\u043E\u043A):",
+        // "Зберегти"
+        L"\u0417\u0431\u0435\u0440\u0435\u0433\u0442\u0438",
+        // "Скасувати"
+        L"\u0421\u043A\u0430\u0441\u0443\u0432\u0430\u0442\u0438",
+        // "Тема: Темна"
+        L"\u0422\u0435\u043C\u0430: \u0422\u0435\u043C\u043D\u0430",
+        // "Тема: Світла"
+        L"\u0422\u0435\u043C\u0430: \u0421\u0432\u0456\u0442\u043B\u0430",
+        // "Налаштування успішно збережено у config.ini!"
+        L"\u041D\u0430\u043B\u0430\u0448\u0442\u0443\u0432\u0430\u043D\u043D\u044F \u0443\u0441\u043F\u0456\u0448\u043D\u043E \u0437\u0431\u0435\u0440\u0435\u0436\u0435\u043D\u043E \u0443 config.ini!",
+        // "Некоректна назва клавіші (f1-f12, insert, delete, home, end, a-z)"
+        L"\u041D\u0435\u043A\u043E\u0440\u0435\u043A\u0442\u043D\u0430 \u043D\u0430\u0437\u0432\u0430 \u043A\u043B\u0430\u0432\u0456\u0448\u0456 (f1-f12, insert, delete, home, end, a-z)",
         "Analyze this screenshot carefully. If there is a question, test, or task, provide a concise, direct, and correct answer in Ukrainian. If it contains code or an error, explain the fix concisely in Ukrainian. IMPORTANT: Format your response as clean plain text only. Do NOT use Markdown (no **, *, #) and do NOT use LaTeX math syntax (no $, $$, \\frac, \\text, \\quad). Use standard plain-text math notation and Unicode symbols (e.g., x^2, /, *, <, >, <=, >=, !=)."
     },
+    // 2: Русский
     {
-        L"Ответ ИИ",
-        L"Ответа пока нет. Нажмите клавишу захвата экрана.",
-        L"Анализирую скриншот, подождите...",
-        L"Копировать",
-        L"Скопировано!",
-        L"Закрыть",
-        L"Настройки и Ключи",
-        L"Сделать скриншот:",
-        L"Показать окно:",
-        L"Консоль / Дебаг:",
-        L"Меню биндов:",
-        L"Выход из кода:",
-        L"Язык интерфейса:",
-        L"Модель Gemini:",
-        L"API-ключи Gemini (по одному на строку):",
-        L"Сохранить",
-        L"Отмена",
-        L"Настройки успешно сохранены в config.ini!",
-        L"Неверная клавиша (f1-f12, insert, delete, home, end, a-z)",
+        // "Ответ ИИ"
+        L"\u041E\u0442\u0432\u0435\u0442 \u0418\u0418",
+        // "Ответа пока нет. Нажмите клавишу захвата экрана."
+        L"\u041E\u0442\u0432\u0435\u0442\u0430 \u043F\u043E\u043A\u0430 \u043D\u0435\u0442. \u041D\u0430\u0436\u043C\u0438\u0442\u0435 \u043A\u043B\u0430\u0432\u0438\u0448\u0443 \u0437\u0430\u0445\u0432\u0430\u0442\u0430 \u044D\u043A\u0440\u0430\u043D\u0430.",
+        // "Анализирую скриншот, подождите..."
+        L"\u0410\u043D\u0430\u043B\u0438\u0437\u0438\u0440\u0443\u044E \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442, \u043F\u043E\u0434\u043E\u0436\u0434\u0438\u0442\u0435...",
+        // "Копировать"
+        L"\u041A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C",
+        // "Скопировано!"
+        L"\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E!",
+        // "Закрыть"
+        L"\u0417\u0430\u043A\u0440\u044B\u0442\u044C",
+        // "Настройки и Ключи"
+        L"\u041D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u0438 \u041A\u043B\u044E\u0447\u0438",
+        // "Сделать скриншот:"
+        L"\u0421\u0434\u0435\u043B\u0430\u0442\u044C \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442:",
+        // "Показать окно:"
+        L"\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u043E\u043A\u043D\u043E:",
+        // "Консоль / Дебаг:"
+        L"\u041A\u043E\u043D\u0441\u043E\u043B\u044C / \u0414\u0435\u0431\u0430\u0433:",
+        // "Меню настроек:"
+        L"\u041C\u0435\u043D\u044E \u043D\u0430\u0441\u0442\u0440\u043E\u0435\u043A:",
+        // "Выход из кода:"
+        L"\u0412\u044B\u0445\u043E\u0434 \u0438\u0437 \u043A\u043E\u0434\u0430:",
+        // "Язык интерфейса:"
+        L"\u042F\u0437\u044B\u043A \u0438\u043D\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0430:",
+        // "Модель Gemini:"
+        L"\u041C\u043E\u0434\u0435\u043B\u044C Gemini:",
+        // "Промпт для ИИ (отправляется со скриншотом):"
+        L"\u041F\u0440\u043E\u043C\u043F\u0442 \u0434\u043B\u044F \u0418\u0418 (\u0441\u043E \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u043E\u043C):",
+        // "По умолч."
+        L"\u041F\u043E \u0443\u043C\u043E\u043B\u0447.",
+        // "API-ключи Gemini (по одному на строку):"
+        L"API-\u043A\u043B\u044E\u0447\u0438 Gemini (\u043F\u043E \u043E\u0434\u043D\u043E\u043C\u0443 \u043D\u0430 \u0441\u0442\u0440\u043E\u043A\u0443):",
+        // "Сохранить"
+        L"\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C",
+        // "Отмена"
+        L"\u041E\u0442\u043C\u0435\u043D\u0430",
+        // "Тема: Тёмная"
+        L"\u0422\u0435\u043C\u0430: \u0422\u0451\u043C\u043D\u0430\u044F",
+        // "Тема: Светлая"
+        L"\u0422\u0435\u043C\u0430: \u0421\u0432\u0435\u0442\u043B\u0430\u044F",
+        // "Настройки успешно сохранены в config.ini!"
+        L"\u041D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u0443\u0441\u043F\u0435\u0448\u043D\u043E \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u044B \u0432 config.ini!",
+        // "Неверная клавиша (f1-f12, insert, delete, home, end, a-z)"
+        L"\u041D\u0435\u0432\u0435\u0440\u043D\u0430\u044F \u043A\u043B\u0430\u0432\u0438\u0448\u0430 (f1-f12, insert, delete, home, end, a-z)",
         "Analyze this screenshot carefully. If there is a question, test, or task, provide a concise, direct, and correct answer in Russian. If it contains code or an error, explain the fix concisely in Russian. IMPORTANT: Format your response as clean plain text only. Do NOT use Markdown (no **, *, #) and do NOT use LaTeX math syntax (no $, $$, \\frac, \\text, \\quad). Use standard plain-text math notation and Unicode symbols (e.g., x^2, /, *, <, >, <=, >=, !=)."
     }
 };
@@ -156,6 +238,83 @@ std::atomic<bool> is_loading(false);
 
 HWND g_hPopupWnd = NULL;
 HWND g_hSettingsWnd = NULL;
+HWND g_hConsoleHostWnd = NULL;
+std::atomic<bool> g_consoleVisible(false);
+
+// Shared theme brushes
+HBRUSH g_hBrDarkBg = NULL;
+HBRUSH g_hBrDarkCtrl = NULL;
+HBRUSH g_hBrLightBg = NULL;
+HBRUSH g_hBrLightCtrl = NULL;
+
+void InitThemeBrushes() {
+    if (!g_hBrDarkBg)    g_hBrDarkBg    = CreateSolidBrush(RGB(24, 24, 28));
+    if (!g_hBrDarkCtrl)  g_hBrDarkCtrl  = CreateSolidBrush(RGB(36, 36, 42));
+    if (!g_hBrLightBg)   g_hBrLightBg   = CreateSolidBrush(RGB(240, 240, 240));
+    if (!g_hBrLightCtrl) g_hBrLightCtrl = CreateSolidBrush(RGB(255, 255, 255));
+}
+
+void ApplyWindowDarkTitleBar(HWND hWnd, bool dark) {
+    BOOL useDark = dark ? TRUE : FALSE;
+    // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Win11 & Win10 20H1+), 19 = fallback for older Win10
+    if (FAILED(DwmSetWindowAttribute(hWnd, 20, &useDark, sizeof(useDark)))) {
+        DwmSetWindowAttribute(hWnd, 19, &useDark, sizeof(useDark));
+    }
+}
+
+static BOOL CALLBACK ApplyChildThemeProc(HWND hChild, LPARAM lParam) {
+    bool dark = (lParam != 0);
+    wchar_t cls[64] = { 0 };
+    GetClassNameW(hChild, cls, 63);
+    if (_wcsicmp(cls, L"COMBOBOX") == 0) {
+        SetWindowTheme(hChild, dark ? L"DarkMode_CFD" : L"CFD", NULL);
+    }
+    else {
+        SetWindowTheme(hChild, dark ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    }
+    InvalidateRect(hChild, NULL, TRUE);
+    return TRUE;
+}
+
+void ApplyThemeToWindowAndChildren(HWND hWnd, bool dark) {
+    if (!hWnd || !IsWindow(hWnd)) return;
+    InitThemeBrushes();
+    ApplyWindowDarkTitleBar(hWnd, dark);
+    EnumChildWindows(hWnd, ApplyChildThemeProc, (LPARAM)(dark ? 1 : 0));
+    InvalidateRect(hWnd, NULL, TRUE);
+    RedrawWindow(hWnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+}
+
+void DrawThemedButton(const DRAWITEMSTRUCT* dis, bool dark) {
+    HDC hdc = dis->hDC;
+    RECT rc = dis->rcItem;
+    bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+    bool focused = (dis->itemState & ODS_FOCUS) != 0;
+
+    COLORREF bgCol = dark
+        ? (pressed ? RGB(62, 62, 72) : RGB(45, 45, 54))
+        : (pressed ? RGB(215, 215, 220) : RGB(228, 228, 232));
+    COLORREF borderCol = dark
+        ? (focused ? RGB(100, 140, 220) : RGB(78, 78, 90))
+        : (focused ? RGB(0, 120, 215) : RGB(170, 170, 175));
+    COLORREF txtCol = dark ? RGB(240, 240, 245) : RGB(20, 20, 24);
+
+    HBRUSH hBr = CreateSolidBrush(bgCol);
+    FillRect(hdc, &rc, hBr);
+    DeleteObject(hBr);
+
+    HBRUSH hBorderBr = CreateSolidBrush(borderCol);
+    FrameRect(hdc, &rc, hBorderBr);
+    DeleteObject(hBorderBr);
+
+    wchar_t text[128] = { 0 };
+    GetWindowTextW(dis->hwndItem, text, 127);
+
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, txtCol);
+    if (pressed) OffsetRect(&rc, 1, 1);
+    DrawTextW(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
 
 static const char* CIPHER_ALPHABET = "q8Nw2Km9Px5Rz7Lv4Tb6Yc3Hd1Fg0JkE_nSpWuAyCeGiMoU-aBDrsItVjXlhOZfQ";
 
@@ -326,6 +485,45 @@ std::string WideToUtf8(const std::wstring& wstr) {
     std::string str(size, 0);
     WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &str[0], size, NULL, NULL);
     return str;
+}
+
+std::string EscapeIniNewlines(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\r') continue;
+        if (c == '\n') out += "\\n";
+        else if (c == '\\') out += "\\\\";
+        else out.push_back(c);
+    }
+    return out;
+}
+
+std::string UnescapeIniNewlines(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            if (s[i + 1] == 'n') {
+                out += "\r\n";
+                ++i;
+                continue;
+            }
+            if (s[i + 1] == '\\') {
+                out.push_back('\\');
+                ++i;
+                continue;
+            }
+        }
+        out.push_back(s[i]);
+    }
+    return out;
+}
+
+std::string GetActivePrompt() {
+    std::string trimmed = TrimString(g_keys.customPrompt);
+    if (!trimmed.empty()) return trimmed;
+    return LOC[g_keys.lang].aiPrompt;
 }
 
 std::wstring GetModuleDir() {
@@ -599,7 +797,7 @@ std::string CleanResponseText(std::string text) {
         std::string inner;
         size_t afterInner = 0;
         if (ExtractBracedGroup(text, p1, inner, afterInner)) {
-            std::string repl = IsSimpleToken(inner) ? ("√" + inner) : ("√(" + inner + ")");
+            std::string repl = IsSimpleToken(inner) ? ("\xE2\x88\x9A" + inner) : ("\xE2\x88\x9A(" + inner + ")");
             text.replace(pos, afterInner - pos, repl);
             pos += repl.size();
         }
@@ -612,18 +810,18 @@ std::string CleanResponseText(std::string text) {
     ReplaceAll(text, "\\quad", " ");
     ReplaceAll(text, "\\left", "");
     ReplaceAll(text, "\\right", "");
-    ReplaceAll(text, "\\cdot", "·");
-    ReplaceAll(text, "\\times", "×");
-    ReplaceAll(text, "\\div", "÷");
-    ReplaceAll(text, "\\pm", "±");
-    ReplaceAll(text, "\\leq", "≤");
-    ReplaceAll(text, "\\geq", "≥");
-    ReplaceAll(text, "\\neq", "≠");
-    ReplaceAll(text, "\\le", "≤");
-    ReplaceAll(text, "\\ge", "≥");
-    ReplaceAll(text, "\\ne", "≠");
-    ReplaceAll(text, "\\approx", "≈");
-    ReplaceAll(text, "\\infty", "∞");
+    ReplaceAll(text, "\\cdot", "\xC2\xB7");
+    ReplaceAll(text, "\\times", "\xC3\x97");
+    ReplaceAll(text, "\\div", "\xC3\xB7");
+    ReplaceAll(text, "\\pm", "\xC2\xB1");
+    ReplaceAll(text, "\\leq", "\xE2\x89\xA4");
+    ReplaceAll(text, "\\geq", "\xE2\x89\xA5");
+    ReplaceAll(text, "\\neq", "\xE2\x89\xA0");
+    ReplaceAll(text, "\\le", "\xE2\x89\xA4");
+    ReplaceAll(text, "\\ge", "\xE2\x89\xA5");
+    ReplaceAll(text, "\\ne", "\xE2\x89\xA0");
+    ReplaceAll(text, "\\approx", "\xE2\x89\x88");
+    ReplaceAll(text, "\\infty", "\xE2\x88\x9E");
     ReplaceAll(text, "\\Rightarrow", "=>");
     ReplaceAll(text, "\\rightarrow", "->");
     ReplaceAll(text, "\\to", "->");
@@ -746,7 +944,7 @@ void ProcessScreen() {
         }
 
         std::string base64Img = Base64Encode(imgBytes.data(), (unsigned int)imgBytes.size());
-        std::string prompt = LOC[g_keys.lang].aiPrompt;
+        std::string prompt = GetActivePrompt();
 
         std::string jsonPayload = "{\"contents\":[{\"parts\":[{\"text\":\"" + EscapeJsonString(prompt) + "\"},{\"inline_data\":{\"mime_type\":\"image/jpeg\",\"data\":\"" + base64Img + "\"}}]}]}";
 
@@ -822,8 +1020,11 @@ void CopyTextToClipboard(HWND hOwner, const std::wstring& text) {
     CloseClipboard();
 }
 
+void SaveConfig();
+
 LRESULT CALLBACK PopupWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static HWND hEdit = NULL;
+    static HWND hBtnTheme = NULL;
     static HWND hBtnCopy = NULL;
     static HWND hBtnClose = NULL;
     static HFONT hFontText = NULL;
@@ -831,6 +1032,7 @@ LRESULT CALLBACK PopupWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     switch (msg) {
     case WM_CREATE: {
+        InitThemeBrushes();
         const LocStrings& L = LOC[g_keys.lang];
         std::wstring wText = is_loading.load()
             ? L.wLoading
@@ -850,15 +1052,22 @@ LRESULT CALLBACK PopupWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         SendMessageW(hEdit, WM_SETFONT, (WPARAM)hFontText, TRUE);
         SendMessageW(hEdit, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
 
+        hBtnTheme = CreateWindowW(L"BUTTON", g_keys.darkTheme ? L.wThemeDarkBtn : L.wThemeLightBtn,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            15, 440, 140, 32, hWnd, (HMENU)IDC_POPUP_THEME, NULL, NULL);
+        SendMessageW(hBtnTheme, WM_SETFONT, (WPARAM)hFontBtn, TRUE);
+
         hBtnCopy = CreateWindowW(L"BUTTON", L.wCopyBtn,
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             425, 440, 105, 32, hWnd, (HMENU)IDC_POPUP_COPY, NULL, NULL);
         SendMessageW(hBtnCopy, WM_SETFONT, (WPARAM)hFontBtn, TRUE);
 
         hBtnClose = CreateWindowW(L"BUTTON", L.wCloseBtn,
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             540, 440, 105, 32, hWnd, (HMENU)IDC_POPUP_CLOSE, NULL, NULL);
         SendMessageW(hBtnClose, WM_SETFONT, (WPARAM)hFontBtn, TRUE);
+
+        ApplyThemeToWindowAndChildren(hWnd, g_keys.darkTheme);
         break;
     }
     case WM_SIZE: {
@@ -874,19 +1083,50 @@ LRESULT CALLBACK PopupWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 (std::max)(100, width - margin * 2),
                 (std::max)(80, height - margin - bottomArea), TRUE);
         }
+        int btnY = height - btnHeight - 12;
+        if (hBtnTheme) {
+            MoveWindow(hBtnTheme, margin, btnY, 140, btnHeight, TRUE);
+        }
         if (hBtnCopy && hBtnClose) {
-            int btnY = height - btnHeight - 12;
             MoveWindow(hBtnClose, width - margin - btnWidth, btnY, btnWidth, btnHeight, TRUE);
             MoveWindow(hBtnCopy, width - margin - btnWidth * 2 - 10, btnY, btnWidth, btnHeight, TRUE);
+        }
+        break;
+    }
+    case WM_ERASEBKGND: {
+        HDC hdc = (HDC)wParam;
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+        FillRect(hdc, &rc, g_keys.darkTheme ? g_hBrDarkBg : g_hBrLightBg);
+        return 1;
+    }
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT* dis = (const DRAWITEMSTRUCT*)lParam;
+        if (dis && dis->CtlType == ODT_BUTTON) {
+            DrawThemedButton(dis, g_keys.darkTheme);
+            return TRUE;
         }
         break;
     }
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLOREDIT: {
         HDC hdc = (HDC)wParam;
-        SetBkColor(hdc, RGB(255, 255, 255));
-        SetTextColor(hdc, RGB(25, 25, 25));
-        return (LRESULT)GetStockObject(WHITE_BRUSH);
+        if (g_keys.darkTheme) {
+            SetBkColor(hdc, RGB(36, 36, 42));
+            SetTextColor(hdc, RGB(238, 238, 242));
+            return (LRESULT)g_hBrDarkCtrl;
+        }
+        else {
+            SetBkColor(hdc, RGB(255, 255, 255));
+            SetTextColor(hdc, RGB(25, 25, 25));
+            return (LRESULT)g_hBrLightCtrl;
+        }
+    }
+    case WM_APPLY_THEME: {
+        const LocStrings& L = LOC[g_keys.lang];
+        if (hBtnTheme) SetWindowTextW(hBtnTheme, g_keys.darkTheme ? L.wThemeDarkBtn : L.wThemeLightBtn);
+        ApplyThemeToWindowAndChildren(hWnd, g_keys.darkTheme);
+        break;
     }
     case WM_UPDATE_RESPONSE: {
         const LocStrings& L = LOC[g_keys.lang];
@@ -899,6 +1139,7 @@ LRESULT CALLBACK PopupWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         if (hBtnCopy) {
             SetWindowTextW(hBtnCopy, L.wCopyBtn);
+            InvalidateRect(hBtnCopy, NULL, TRUE);
         }
         break;
     }
@@ -907,6 +1148,15 @@ LRESULT CALLBACK PopupWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (!latest_answer.empty()) {
                 CopyTextToClipboard(hWnd, Utf8ToWide(latest_answer));
                 SetWindowTextW(hBtnCopy, LOC[g_keys.lang].wCopiedBtn);
+                InvalidateRect(hBtnCopy, NULL, TRUE);
+            }
+        }
+        else if (LOWORD(wParam) == IDC_POPUP_THEME) {
+            g_keys.darkTheme = !g_keys.darkTheme;
+            SaveConfig();
+            SendMessageW(hWnd, WM_APPLY_THEME, 0, 0);
+            if (g_hSettingsWnd && IsWindow(g_hSettingsWnd)) {
+                PostMessageW(g_hSettingsWnd, WM_APPLY_THEME, 0, 0);
             }
         }
         else if (LOWORD(wParam) == IDC_POPUP_CLOSE || LOWORD(wParam) == IDCANCEL) {
@@ -921,6 +1171,7 @@ LRESULT CALLBACK PopupWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (hFontText) { DeleteObject(hFontText); hFontText = NULL; }
         if (hFontBtn) { DeleteObject(hFontBtn); hFontBtn = NULL; }
         hEdit = NULL;
+        hBtnTheme = NULL;
         hBtnCopy = NULL;
         hBtnClose = NULL;
         g_hPopupWnd = NULL;
@@ -933,7 +1184,7 @@ LRESULT CALLBACK PopupWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 }
 
 void ShowPopup() {
-    if (g_hPopupWnd != NULL) {
+    if (g_hPopupWnd != NULL && IsWindow(g_hPopupWnd)) {
         PostMessageW(g_hPopupWnd, WM_CLOSE, 0, 0);
         return;
     }
@@ -945,7 +1196,7 @@ void ShowPopup() {
         wc.hInstance = GetModuleHandle(NULL);
         wc.lpszClassName = L"GeminiPopupClass";
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hbrBackground = NULL;
         RegisterClassW(&wc);
         classRegistered = true;
     }
@@ -970,8 +1221,15 @@ void ShowPopup() {
     }
 }
 
-UINT ParseKeyStringToVK(const std::wstring& str) {
-    if (str.size() >= 2 && (str[0] == L'f' || str[0] == L'F')) {
+UINT ParseKeyStringToVK(std::wstring str) {
+    str = Utf8ToWide(TrimString(WideToUtf8(str)));
+    for (wchar_t& c : str) {
+        if (c >= L'A' && c <= L'Z') {
+            c = (wchar_t)(c - L'A' + L'a');
+        }
+    }
+
+    if (str.size() >= 2 && str[0] == L'f') {
         int fn = _wtoi(str.c_str() + 1);
         if (fn >= 1 && fn <= 12) return VK_F1 + (fn - 1);
     }
@@ -980,7 +1238,8 @@ UINT ParseKeyStringToVK(const std::wstring& str) {
     if (str == L"home") return VK_HOME;
     if (str == L"end") return VK_END;
     if (str.length() == 1) {
-        wchar_t ch = (wchar_t)CharUpperW((LPWSTR)(ULONG_PTR)str[0]);
+        wchar_t ch = str[0];
+        if (ch >= L'a' && ch <= L'z') ch = (wchar_t)(ch - L'a' + L'A');
         if ((ch >= L'A' && ch <= L'Z') || (ch >= L'0' && ch <= L'9')) return (UINT)ch;
     }
     return 0;
@@ -992,8 +1251,12 @@ std::wstring VKToKeyString(UINT vk) {
     if (vk == VK_DELETE) return L"delete";
     if (vk == VK_HOME) return L"home";
     if (vk == VK_END) return L"end";
-    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
-        wchar_t ch = (wchar_t)CharLowerW((LPWSTR)(ULONG_PTR)vk);
+    if (vk >= 'A' && vk <= 'Z') {
+        wchar_t ch = (wchar_t)(vk - 'A' + L'a');
+        return std::wstring(1, ch);
+    }
+    if (vk >= '0' && vk <= '9') {
+        wchar_t ch = (wchar_t)vk;
         return std::wstring(1, ch);
     }
     return L"unknown";
@@ -1010,7 +1273,9 @@ void SaveConfig() {
         file << "settings=" << WideToUtf8(VKToKeyString(g_keys.vkSettings)) << "\n";
         file << "console=" << WideToUtf8(VKToKeyString(g_keys.vkConsole)) << "\n";
         file << "lang=" << (int)g_keys.lang << "\n";
-        file << "model=" << g_keys.selectedModel << "\n\n";
+        file << "dark_theme=" << (g_keys.darkTheme ? 1 : 0) << "\n";
+        file << "model=" << g_keys.selectedModel << "\n";
+        file << "prompt=" << EscapeIniNewlines(g_keys.customPrompt) << "\n\n";
 
         file << "[EncryptedKeys]\n";
         for (const auto& key : API_KEYS) {
@@ -1052,17 +1317,38 @@ void LoadConfig() {
                     std::string key = TrimString(line.substr(0, eq));
                     std::string val = TrimString(line.substr(eq + 1));
 
-                    if (key == "capture") g_keys.vkCapture = ParseKeyStringToVK(Utf8ToWide(val));
-                    else if (key == "show") g_keys.vkShow = ParseKeyStringToVK(Utf8ToWide(val));
-                    else if (key == "exit") g_keys.vkExit = ParseKeyStringToVK(Utf8ToWide(val));
-                    else if (key == "settings") g_keys.vkSettings = ParseKeyStringToVK(Utf8ToWide(val));
-                    else if (key == "console") g_keys.vkConsole = ParseKeyStringToVK(Utf8ToWide(val));
+                    if (key == "capture") {
+                        UINT v = ParseKeyStringToVK(Utf8ToWide(val));
+                        if (v) g_keys.vkCapture = v;
+                    }
+                    else if (key == "show") {
+                        UINT v = ParseKeyStringToVK(Utf8ToWide(val));
+                        if (v) g_keys.vkShow = v;
+                    }
+                    else if (key == "exit") {
+                        UINT v = ParseKeyStringToVK(Utf8ToWide(val));
+                        if (v) g_keys.vkExit = v;
+                    }
+                    else if (key == "settings") {
+                        UINT v = ParseKeyStringToVK(Utf8ToWide(val));
+                        if (v) g_keys.vkSettings = v;
+                    }
+                    else if (key == "console") {
+                        UINT v = ParseKeyStringToVK(Utf8ToWide(val));
+                        if (v) g_keys.vkConsole = v;
+                    }
                     else if (key == "lang") {
                         int l = std::atoi(val.c_str());
                         if (l >= 0 && l <= 2) g_keys.lang = (AppLanguage)l;
                     }
+                    else if (key == "dark_theme") {
+                        g_keys.darkTheme = (std::atoi(val.c_str()) != 0);
+                    }
                     else if (key == "model" && !val.empty()) {
                         g_keys.selectedModel = val;
+                    }
+                    else if (key == "prompt") {
+                        g_keys.customPrompt = UnescapeIniNewlines(val);
                     }
                 }
             }
@@ -1103,23 +1389,132 @@ void ReapplyHotkeys() {
     std::wcout << L"Active Model: " << Utf8ToWide(g_keys.selectedModel) << L"\n\n";
 }
 
+// --- Windows 10 & Windows 11 (Windows Terminal) Console Hiding Support ---
+static const wchar_t* CONSOLE_UNIQUE_TITLE = L"GeminiAI_DebugConsole_Host";
+
+struct FindTermWindowData {
+    HWND foundHwnd = NULL;
+};
+
+static BOOL CALLBACK EnumWindowsFindTerminalProc(HWND hWnd, LPARAM lParam) {
+    wchar_t cls[64] = { 0 };
+    if (!GetClassNameW(hWnd, cls, 63)) return TRUE;
+
+    if (wcscmp(cls, L"CASCADIA_HOSTING_WINDOW_CLASS") == 0 ||
+        wcscmp(cls, L"ConsoleWindowClass") == 0) {
+        wchar_t title[256] = { 0 };
+        GetWindowTextW(hWnd, title, 255);
+        if (wcsstr(title, CONSOLE_UNIQUE_TITLE) != NULL) {
+            FindTermWindowData* data = (FindTermWindowData*)lParam;
+            data->foundHwnd = hWnd;
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+HWND ResolveConsoleHostWindow() {
+    if (g_hConsoleHostWnd && IsWindow(g_hConsoleHostWnd)) {
+        return g_hConsoleHostWnd;
+    }
+
+    FindTermWindowData data;
+    EnumWindows(EnumWindowsFindTerminalProc, (LPARAM)&data);
+    if (data.foundHwnd) {
+        g_hConsoleHostWnd = data.foundHwnd;
+        return g_hConsoleHostWnd;
+    }
+
+    HWND hCon = GetConsoleWindow();
+    if (hCon) {
+        wchar_t cls[64] = { 0 };
+        GetClassNameW(hCon, cls, 63);
+        if (wcscmp(cls, L"ConsoleWindowClass") == 0) {
+            g_hConsoleHostWnd = hCon;
+            return g_hConsoleHostWnd;
+        }
+        HWND hRoot = GetAncestor(hCon, GA_ROOTOWNER);
+        if (hRoot && hRoot != hCon) {
+            g_hConsoleHostWnd = hRoot;
+            return g_hConsoleHostWnd;
+        }
+    }
+    return hCon;
+}
+
+void HideConsoleReliableAtStartup() {
+    SetConsoleTitleW(CONSOLE_UNIQUE_TITLE);
+
+    // Check if foreground window right at startup is Windows Terminal
+    HWND hFg = GetForegroundWindow();
+    if (hFg) {
+        wchar_t cls[64] = { 0 };
+        GetClassNameW(hFg, cls, 63);
+        if (wcscmp(cls, L"CASCADIA_HOSTING_WINDOW_CLASS") == 0) {
+            g_hConsoleHostWnd = hFg;
+            ShowWindow(hFg, SW_HIDE);
+        }
+    }
+
+    HWND hCon = GetConsoleWindow();
+    if (hCon) ShowWindow(hCon, SW_HIDE);
+
+    // On Windows 11, WindowsTerminal.exe creates and shows its XAML host window
+    // asynchronously (~30-350ms after main() starts). Poll briefly to catch & hide it.
+    std::thread([]() {
+        for (int i = 0; i < 35; ++i) {
+            if (g_consoleVisible.load()) break;
+            HWND hHost = ResolveConsoleHostWindow();
+            if (hHost && IsWindowVisible(hHost)) {
+                ShowWindow(hHost, SW_HIDE);
+            }
+            HWND hPseudo = GetConsoleWindow();
+            if (hPseudo && IsWindowVisible(hPseudo)) {
+                ShowWindow(hPseudo, SW_HIDE);
+            }
+            Sleep(15);
+        }
+    }).detach();
+}
+
 void ToggleConsole() {
-    HWND hConsole = GetConsoleWindow();
-    if (!hConsole) return;
-    if (IsWindowVisible(hConsole)) {
-        ShowWindow(hConsole, SW_HIDE);
+    HWND hHost = ResolveConsoleHostWindow();
+    HWND hCon = GetConsoleWindow();
+
+    if (g_consoleVisible.load()) {
+        g_consoleVisible = false;
+        if (hHost) ShowWindow(hHost, SW_HIDE);
+        if (hCon && hCon != hHost) ShowWindow(hCon, SW_HIDE);
     }
     else {
-        ShowWindow(hConsole, SW_SHOW);
-        SetForegroundWindow(hConsole);
+        g_consoleVisible = true;
+        if (hCon && hCon != hHost) ShowWindow(hCon, SW_SHOW);
+        if (hHost) {
+            ShowWindow(hHost, SW_RESTORE);
+            ShowWindow(hHost, SW_SHOW);
+            SetForegroundWindow(hHost);
+        }
     }
 }
 
+static bool IsDefaultPromptText(const std::string& p) {
+    std::string t = TrimString(p);
+    if (t.empty()) return true;
+    for (int i = 0; i < 3; ++i) {
+        if (t == LOC[i].aiPrompt) return true;
+    }
+    return false;
+}
+
 LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    static HWND hEdCapture, hEdShow, hEdExit, hEdSettings, hEdConsole, hComboLang, hComboModel, hEdApiKeys;
+    static HWND hEdCapture, hEdShow, hEdExit, hEdSettings, hEdConsole;
+    static HWND hComboLang, hComboModel, hEdPrompt, hEdApiKeys;
+    static HWND hBtnTheme, hBtnResetPrompt, hBtnSave, hBtnCancel;
     static HFONT hFont = NULL;
+
     switch (msg) {
     case WM_CREATE: {
+        InitThemeBrushes();
         hFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -1127,9 +1522,9 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         const LocStrings& L = LOC[g_keys.lang];
 
         auto CreateLabelAndEdit = [&](const wchar_t* label, int y, HWND& hEdit, UINT vk) {
-            HWND hLbl = CreateWindowW(L"STATIC", label, WS_CHILD | WS_VISIBLE, 20, y, 160, 22, hWnd, NULL, NULL, NULL);
+            HWND hLbl = CreateWindowW(L"STATIC", label, WS_CHILD | WS_VISIBLE, 20, y, 175, 22, hWnd, NULL, NULL, NULL);
             SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
-            hEdit = CreateWindowW(L"EDIT", VKToKeyString(vk).c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER, 190, y, 150, 22, hWnd, NULL, NULL, NULL);
+            hEdit = CreateWindowW(L"EDIT", VKToKeyString(vk).c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER, 200, y, 180, 22, hWnd, NULL, NULL, NULL);
             SendMessageW(hEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
         };
 
@@ -1139,27 +1534,42 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         CreateLabelAndEdit(L.wSettingsLabel, 110, hEdSettings, g_keys.vkSettings);
         CreateLabelAndEdit(L.wExitLabel, 140, hEdExit, g_keys.vkExit);
 
-        HWND hLangLbl = CreateWindowW(L"STATIC", L.wLangLabel, WS_CHILD | WS_VISIBLE, 20, 170, 160, 22, hWnd, NULL, NULL, NULL);
+        HWND hLangLbl = CreateWindowW(L"STATIC", L.wLangLabel, WS_CHILD | WS_VISIBLE, 20, 170, 175, 22, hWnd, NULL, NULL, NULL);
         SendMessageW(hLangLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        hComboLang = CreateWindowW(L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 190, 170, 150, 120, hWnd, NULL, NULL, NULL);
+        hComboLang = CreateWindowW(L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 200, 170, 180, 120, hWnd, (HMENU)IDC_SET_LANG_COMBO, NULL, NULL);
         SendMessageW(hComboLang, WM_SETFONT, (WPARAM)hFont, TRUE);
+        // Explicit Unicode escapes for "English", "Українська", "Русский"
         SendMessageW(hComboLang, CB_ADDSTRING, 0, (LPARAM)L"English");
-        SendMessageW(hComboLang, CB_ADDSTRING, 0, (LPARAM)L"Українська");
-        SendMessageW(hComboLang, CB_ADDSTRING, 0, (LPARAM)L"Русский");
+        SendMessageW(hComboLang, CB_ADDSTRING, 0, (LPARAM)L"\u0423\u043A\u0440\u0430\u0457\u043D\u0441\u044C\u043A\u0430");
+        SendMessageW(hComboLang, CB_ADDSTRING, 0, (LPARAM)L"\u0420\u0443\u0441\u0441\u043A\u0438\u0439");
         SendMessageW(hComboLang, CB_SETCURSEL, (WPARAM)g_keys.lang, 0);
 
-        HWND hModelLbl = CreateWindowW(L"STATIC", L.wModelLabel, WS_CHILD | WS_VISIBLE, 20, 200, 160, 22, hWnd, NULL, NULL, NULL);
+        HWND hModelLbl = CreateWindowW(L"STATIC", L.wModelLabel, WS_CHILD | WS_VISIBLE, 20, 202, 175, 22, hWnd, NULL, NULL, NULL);
         SendMessageW(hModelLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        hComboModel = CreateWindowW(L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | WS_VSCROLL, 190, 200, 150, 140, hWnd, NULL, NULL, NULL);
+        hComboModel = CreateWindowW(L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | WS_VSCROLL, 200, 202, 180, 140, hWnd, NULL, NULL, NULL);
         SendMessageW(hComboModel, WM_SETFONT, (WPARAM)hFont, TRUE);
         for (const auto& m : PRESET_MODELS) {
             SendMessageW(hComboModel, CB_ADDSTRING, 0, (LPARAM)m.c_str());
         }
         SetWindowTextW(hComboModel, Utf8ToWide(g_keys.selectedModel).c_str());
 
-        HWND hKeysLbl = CreateWindowW(L"STATIC", L.wKeysLabel, WS_CHILD | WS_VISIBLE, 20, 235, 320, 20, hWnd, NULL, NULL, NULL);
+        // AI Prompt Label + Reset Default Button + Multiline Edit
+        HWND hPromptLbl = CreateWindowW(L"STATIC", L.wPromptLabel, WS_CHILD | WS_VISIBLE, 20, 238, 260, 22, hWnd, NULL, NULL, NULL);
+        SendMessageW(hPromptLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        hBtnResetPrompt = CreateWindowW(L"BUTTON", L.wResetPromptBtn, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 285, 234, 95, 24, hWnd, (HMENU)IDC_SET_RESET_PRM, NULL, NULL);
+        SendMessageW(hBtnResetPrompt, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        std::string currentPromptText = GetActivePrompt();
+        hEdPrompt = CreateWindowExW(0, L"EDIT", Utf8ToWide(currentPromptText).c_str(),
+            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL,
+            20, 262, 360, 85, hWnd, NULL, NULL, NULL);
+        SendMessageW(hEdPrompt, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // API Keys Label + Edit
+        HWND hKeysLbl = CreateWindowW(L"STATIC", L.wKeysLabel, WS_CHILD | WS_VISIBLE, 20, 355, 360, 20, hWnd, NULL, NULL, NULL);
         SendMessageW(hKeysLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         std::string keysDisplay;
@@ -1169,17 +1579,99 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 
         hEdApiKeys = CreateWindowExW(0, L"EDIT", Utf8ToWide(keysDisplay).c_str(),
             WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL,
-            20, 260, 320, 100, hWnd, NULL, NULL, NULL);
+            20, 378, 360, 90, hWnd, NULL, NULL, NULL);
         SendMessageW(hEdApiKeys, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        HWND hBtnSave = CreateWindowW(L"BUTTON", L.wSaveBtn, WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 65, 380, 100, 32, hWnd, (HMENU)1001, NULL, NULL);
-        HWND hBtnCancel = CreateWindowW(L"BUTTON", L.wCancelBtn, WS_CHILD | WS_VISIBLE, 195, 380, 100, 32, hWnd, (HMENU)1002, NULL, NULL);
+        // Theme Toggle + Save + Cancel Buttons
+        hBtnTheme = CreateWindowW(L"BUTTON", g_keys.darkTheme ? L.wThemeDarkBtn : L.wThemeLightBtn,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 20, 482, 125, 32, hWnd, (HMENU)IDC_SET_THEME, NULL, NULL);
+        hBtnSave = CreateWindowW(L"BUTTON", L.wSaveBtn,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 160, 482, 105, 32, hWnd, (HMENU)IDC_SET_SAVE, NULL, NULL);
+        hBtnCancel = CreateWindowW(L"BUTTON", L.wCancelBtn,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 275, 482, 105, 32, hWnd, (HMENU)IDC_SET_CANCEL, NULL, NULL);
+
+        SendMessageW(hBtnTheme, WM_SETFONT, (WPARAM)hFont, TRUE);
         SendMessageW(hBtnSave, WM_SETFONT, (WPARAM)hFont, TRUE);
         SendMessageW(hBtnCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        ApplyThemeToWindowAndChildren(hWnd, g_keys.darkTheme);
+        break;
+    }
+    case WM_ERASEBKGND: {
+        HDC hdc = (HDC)wParam;
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+        FillRect(hdc, &rc, g_keys.darkTheme ? g_hBrDarkBg : g_hBrLightBg);
+        return 1;
+    }
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT* dis = (const DRAWITEMSTRUCT*)lParam;
+        if (dis && dis->CtlType == ODT_BUTTON) {
+            DrawThemedButton(dis, g_keys.darkTheme);
+            return TRUE;
+        }
+        break;
+    }
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wParam;
+        if (g_keys.darkTheme) {
+            SetBkColor(hdc, RGB(24, 24, 28));
+            SetTextColor(hdc, RGB(235, 235, 240));
+            return (LRESULT)g_hBrDarkBg;
+        }
+        else {
+            SetBkColor(hdc, RGB(240, 240, 240));
+            SetTextColor(hdc, RGB(20, 20, 24));
+            return (LRESULT)g_hBrLightBg;
+        }
+    }
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX: {
+        HDC hdc = (HDC)wParam;
+        if (g_keys.darkTheme) {
+            SetBkColor(hdc, RGB(36, 36, 42));
+            SetTextColor(hdc, RGB(240, 240, 245));
+            return (LRESULT)g_hBrDarkCtrl;
+        }
+        else {
+            SetBkColor(hdc, RGB(255, 255, 255));
+            SetTextColor(hdc, RGB(20, 20, 24));
+            return (LRESULT)g_hBrLightCtrl;
+        }
+    }
+    case WM_APPLY_THEME: {
+        const LocStrings& L = LOC[g_keys.lang];
+        if (hBtnTheme) SetWindowTextW(hBtnTheme, g_keys.darkTheme ? L.wThemeDarkBtn : L.wThemeLightBtn);
+        ApplyThemeToWindowAndChildren(hWnd, g_keys.darkTheme);
         break;
     }
     case WM_COMMAND: {
-        if (LOWORD(wParam) == 1001) {
+        if (LOWORD(wParam) == IDC_SET_LANG_COMBO && HIWORD(wParam) == CBN_SELCHANGE) {
+            int selLang = (int)SendMessageW(hComboLang, CB_GETCURSEL, 0, 0);
+            if (selLang >= 0 && selLang <= 2) {
+                int pLen = GetWindowTextLengthW(hEdPrompt);
+                std::vector<wchar_t> pBuf(pLen + 1);
+                GetWindowTextW(hEdPrompt, pBuf.data(), pLen + 1);
+                std::string curP = WideToUtf8(pBuf.data());
+                if (IsDefaultPromptText(curP)) {
+                    SetWindowTextW(hEdPrompt, Utf8ToWide(LOC[selLang].aiPrompt).c_str());
+                }
+            }
+        }
+        else if (LOWORD(wParam) == IDC_SET_RESET_PRM) {
+            int selLang = (int)SendMessageW(hComboLang, CB_GETCURSEL, 0, 0);
+            if (selLang < 0 || selLang > 2) selLang = (int)g_keys.lang;
+            SetWindowTextW(hEdPrompt, Utf8ToWide(LOC[selLang].aiPrompt).c_str());
+        }
+        else if (LOWORD(wParam) == IDC_SET_THEME) {
+            g_keys.darkTheme = !g_keys.darkTheme;
+            SaveConfig();
+            SendMessageW(hWnd, WM_APPLY_THEME, 0, 0);
+            if (g_hPopupWnd && IsWindow(g_hPopupWnd)) {
+                PostMessageW(g_hPopupWnd, WM_APPLY_THEME, 0, 0);
+            }
+        }
+        else if (LOWORD(wParam) == IDC_SET_SAVE) {
             wchar_t b1[32], b2[32], b3[32], b4[32], b5[32], bModel[64];
             GetWindowTextW(hEdCapture, b1, 32);
             GetWindowTextW(hEdShow, b2, 32);
@@ -1194,9 +1686,15 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             UINT k4 = ParseKeyStringToVK(b4);
             UINT k5 = ParseKeyStringToVK(b5);
             int selLang = (int)SendMessageW(hComboLang, CB_GETCURSEL, 0, 0);
+            if (selLang < 0 || selLang > 2) selLang = 0;
 
             std::string chosenModel = TrimString(WideToUtf8(bModel));
             if (chosenModel.empty()) chosenModel = "gemini-3.5-flash-lite";
+
+            int promptLen = GetWindowTextLengthW(hEdPrompt);
+            std::vector<wchar_t> promptBuf(promptLen + 1);
+            GetWindowTextW(hEdPrompt, promptBuf.data(), promptLen + 1);
+            std::string editedPrompt = TrimString(WideToUtf8(promptBuf.data()));
 
             int textLen = GetWindowTextLengthW(hEdApiKeys);
             std::vector<wchar_t> keyBuffer(textLen + 1);
@@ -1222,8 +1720,15 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 g_keys.vkExit = k5;
                 g_keys.lang = (AppLanguage)selLang;
                 g_keys.selectedModel = chosenModel;
+                g_keys.customPrompt = (editedPrompt == LOC[selLang].aiPrompt) ? "" : editedPrompt;
+
                 SaveConfig();
                 ReapplyHotkeys();
+                if (g_hPopupWnd && IsWindow(g_hPopupWnd)) {
+                    SetWindowTextW(g_hPopupWnd, LOC[g_keys.lang].wTitle);
+                    PostMessageW(g_hPopupWnd, WM_UPDATE_RESPONSE, 0, 0);
+                    PostMessageW(g_hPopupWnd, WM_APPLY_THEME, 0, 0);
+                }
                 MessageBoxW(hWnd, LOC[g_keys.lang].wSuccessSave, L"OK", MB_OK | MB_ICONINFORMATION);
                 DestroyWindow(hWnd);
             }
@@ -1231,11 +1736,14 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 MessageBoxW(hWnd, LOC[g_keys.lang].wErrKey, L"Error", MB_OK | MB_ICONERROR);
             }
         }
-        else if (LOWORD(wParam) == 1002) {
+        else if (LOWORD(wParam) == IDC_SET_CANCEL || LOWORD(wParam) == IDCANCEL) {
             DestroyWindow(hWnd);
         }
         break;
     }
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        break;
     case WM_DESTROY:
         if (hFont) { DeleteObject(hFont); hFont = NULL; }
         g_hSettingsWnd = NULL;
@@ -1248,8 +1756,9 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 }
 
 void OpenSettingsGui() {
-    if (g_hSettingsWnd != NULL) {
-        SetForegroundWindow(g_hSettingsWnd);
+    // Toggle behavior: pressing the Settings key again closes the Settings window
+    if (g_hSettingsWnd != NULL && IsWindow(g_hSettingsWnd)) {
+        PostMessageW(g_hSettingsWnd, WM_CLOSE, 0, 0);
         return;
     }
 
@@ -1259,7 +1768,8 @@ void OpenSettingsGui() {
         wc.lpfnWndProc = SettingsWndProc;
         wc.hInstance = GetModuleHandle(NULL);
         wc.lpszClassName = L"GeminiSettingsClass";
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = NULL;
         RegisterClassW(&wc);
         settingsClassRegistered = true;
     }
@@ -1267,12 +1777,18 @@ void OpenSettingsGui() {
     g_hSettingsWnd = CreateWindowExW(
         WS_EX_TOPMOST, L"GeminiSettingsClass", LOC[g_keys.lang].wSettingsTitle,
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, 380, 480,
+        CW_USEDEFAULT, CW_USEDEFAULT, 415, 565,
         NULL, NULL, GetModuleHandle(NULL), NULL
     );
 
+    SetForegroundWindow(g_hSettingsWnd);
+
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
+            DestroyWindow(g_hSettingsWnd);
+            continue;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -1285,9 +1801,9 @@ int main() {
         return 0;
     }
 
-    ShowWindow(GetConsoleWindow(), SW_HIDE);
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
+    HideConsoleReliableAtStartup();
 
     LoadConfig();
 
